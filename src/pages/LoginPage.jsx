@@ -1,3 +1,4 @@
+// src/pages/LoginPage.jsx
 import React, { useState } from "react";
 import {
   Avatar,
@@ -16,9 +17,8 @@ import {
 import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
 import { createTheme, ThemeProvider } from "@mui/material/styles";
 import { login } from "../services/userService";
-import { useNavigate } from "react-router-dom"; // Thêm dòng này
+import { useNavigate } from "react-router-dom";
 
-// 🎨 Chủ đề màu: đen + xanh jean
 const theme = createTheme({
   palette: {
     mode: "dark",
@@ -27,7 +27,7 @@ const theme = createTheme({
       paper: "#121212",
     },
     primary: {
-      main: "#1E88E5", // xanh jean
+      main: "#1E88E5",
     },
     secondary: {
       main: "#64B5F6",
@@ -50,32 +50,60 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const navigate = useNavigate(); // Thêm dòng này
+  const navigate = useNavigate();
+
+  const isAdminUser = (user) => {
+    if (!user) return false;
+    // check common shapes - adapt to your backend
+    if (user.is_admin === true) return true;
+    if (user.isAdmin === true) return true;
+    if (user.role && typeof user.role === "string" && user.role.toLowerCase().includes("admin")) return true;
+    if (user.roles && Array.isArray(user.roles) && user.roles.some(r => String(r).toLowerCase().includes("admin"))) return true;
+    // fallback: check specific flags or email
+    if (user.email && user.email.toLowerCase() === "admin@example.com") return true;
+    return false;
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
     setError("");
     try {
-      const res = await login(email, password); // Sử dụng email, password từ state
-      console.log(res);
-      
-      const token = res.data.access_token;
-      const user = res.data.user;
-      // Lưu token vào localStorage nếu muốn
-      localStorage.setItem("access_token", token);
-      // Chuyển hướng sau khi đăng nhập thành công
-      navigate("/trang-chu");
+      const res = await login(email, password);
+      // Different backends may return shape differently.
+      // Try common patterns:
+      const token = res?.data?.access_token ?? res?.access_token ?? res?.token ?? null;
+      const user = res?.data?.user ?? res?.user ?? res?.data ?? res ?? null;
+
+      if (!token) {
+        // If backend didn't return token in expected place, try deeper (debug)
+        console.warn("Login response (unexpected shape):", res);
+      }
+
+      // store both token and user for later usage
+      if (token) localStorage.setItem("access_token", token);
+      try {
+        localStorage.setItem("user", JSON.stringify(user || {}));
+      } catch (err) { console.warn("Unable to save user to localStorage", err); }
+
+      // Decide where to navigate
+      if (isAdminUser(user)) {
+        navigate("/admin");
+      } else {
+        navigate("/trang-chu");
+      }
     } catch (err) {
       console.error("Login failed:", err);
-      console.error(err.response);
-      if (err.response && err.response.status === 403) {
+      // try to inspect axios-like error
+      const status = err?.response?.status;
+      if (status === 403) {
         setError("Tài khoản của bạn đã bị khóa.");
       } else {
         setError("Tài khoản hoặc mật khẩu không đúng!");
       }
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   return (
