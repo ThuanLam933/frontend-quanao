@@ -789,7 +789,7 @@ function ProductsPage({ setSnack }) {
     }
 
     // If update, use _method=PUT so Laravel accepts multipart form update
-    if (isUpdate) fd.append('_method', 'PUT');
+    if (isUpdate) fd.append('_method', 'POST');
 
     const res = await fetch(endpoint, {
       method: 'POST', // send as POST with _method when updating

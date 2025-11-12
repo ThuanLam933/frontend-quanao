@@ -1,8 +1,6 @@
 // src/pages/CartPage.jsx
 import React, { useEffect, useState, useMemo } from "react";
 import {
-  AppBar,
-  Toolbar,
   Box,
   Container,
   Typography,
@@ -24,7 +22,6 @@ import {
   Chip,
 } from "@mui/material";
 import { createTheme, ThemeProvider } from "@mui/material/styles";
-import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import RemoveCircleOutlineIcon from "@mui/icons-material/RemoveCircleOutline";
 import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
@@ -32,27 +29,7 @@ import ShoppingCartIcon from "@mui/icons-material/ShoppingCart";
 import FavoriteBorderIcon from "@mui/icons-material/FavoriteBorder";
 import { useNavigate } from "react-router-dom";
 
-/**
- * CartPage (server-first)
- *
- * - Nếu localStorage chứa guest_cart_id -> load từ server GET /api/cart-details?cart_id=<id>
- * - Nếu server trả về items: map và lưu localStorage "cart_items" để UI sử dụng
- * - Nếu server không thể trả: fallback đọc localStorage như trước
- *
- * Note:
- * - Backend endpoints assumed:
- *    POST /api/carts                 -> create cart (returns { id: ... })
- *    GET  /api/cart-details?cart_id= -> list cart details (returns array of details)
- *    POST /api/cart-details          -> create cart detail (body includes cart_id, product_detail_id, quantity, price)
- *    PUT  /api/cart-details/{id}     -> update cart detail (quantity)
- *    DELETE /api/cart-details/{id}   -> delete cart detail
- *
- * - Items normalized to shape used by UI:
- *    { id, cart_detail_id?, product_detail_id?, name, price, qty, image_url, slug, description }
- */
-
 const API_BASE = "http://127.0.0.1:8000";
-
 const theme = createTheme({
   palette: {
     mode: "light",
@@ -65,8 +42,7 @@ const theme = createTheme({
   typography: { fontFamily: "Poppins, Roboto, sans-serif" },
 });
 
-const STORAGE_KEY = "cart_items";
-const CART_KEY = "guest_cart_id";
+const STORAGE_KEY = "cart";
 
 export default function CartPage() {
   const navigate = useNavigate();
@@ -75,262 +51,105 @@ export default function CartPage() {
   const [loading, setLoading] = useState(true);
   const [snack, setSnack] = useState(null);
 
-  // ---------- helper: fetch wrapper with credentials ----------
-  async function apiFetch(url, opts = {}) {
-    const headers = { Accept: "application/json", ...(opts.headers || {}) };
-    const cfg = { credentials: "include", ...opts, headers };
-    return fetch(url, cfg);
-  }
-
-  // ---------- normalize server response -> UI shape ----------
-  function normalizeServerItem(it) {
-    // Expecting CartDetail with relation to product (may vary)
-    // Adjust mapping if your backend returns different keys
+  // normalize item shape from storage
+  const normalizeLocalItem = (it) => {
     return {
-      id: it.product_detail_id ?? it.id ?? Math.random(), // fallback id
-      cart_detail_id: it.id ?? null,
+      id: it.id ?? Math.random(),
+      cart_detail_id: it.cart_detail_id ?? null,
       product_detail_id: it.product_detail_id ?? null,
-      name: (it.product && it.product.name) || it.product_name || it.name || `Sản phẩm #${it.product_detail_id ?? it.id}`,
-      price: Number(it.price ?? it.unit_price ?? 0),
+      name: it.name ?? it.title ?? `Sản phẩm #${it.id ?? ""}`,
+      price:
+        typeof it.unit_price === "number"
+          ? it.unit_price
+          : typeof it.price === "number"
+          ? it.price
+          : it.unit_price && !isNaN(parseFloat(it.unit_price))
+          ? parseFloat(it.unit_price)
+          : it.price && !isNaN(parseFloat(it.price))
+          ? parseFloat(it.price)
+          : 0,
       qty: Number(it.quantity ?? it.qty ?? 1),
-      image_url: (it.product && it.product.image_url) || it.image_url || null,
-      slug: (it.product && it.product.slug) || it.product_slug || null,
-      description: (it.product && it.product.description) || it.description || "",
+      image_url: it.image_url ?? it.image ?? null,
+      slug: it.slug ?? null,
+      description: it.description ?? "",
     };
-  }
+  };
 
-  // ---------- refresh from server (and persist to localStorage) ----------
-  async function refreshCartFromServer(cartId) {
-    if (!cartId) return;
-    try {
-      const res = await apiFetch(`${API_BASE}/api/cart-details?cart_id=${cartId}`, { method: "GET" });
-      if (!res.ok) {
-        console.warn("refreshCartFromServer: server returned", res.status);
-        return;
-      }
-      const data = await res.json();
-      const arr = (Array.isArray(data) ? data : data.data ?? []).map(normalizeServerItem);
-      setItems(arr);
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
-        // also keep a guest_cart_count key for legacy/other components
-        const totalQty = arr.reduce((s, it) => s + (Number(it.qty) || 0), 0);
-        localStorage.setItem("guest_cart_count", String(totalQty));
-      } catch (e) {
-        console.warn("Failed to persist cart_items", e);
-      }
-      // broadcast
-      window.dispatchEvent(new CustomEvent("cartUpdated", { detail: { count: arr.reduce((s,i)=>s+(i.qty||0),0), items: arr } }));
-    } catch (e) {
-      console.warn("refreshCartFromServer error", e);
-    }
-  }
-
-  // ---------- initial load ----------
+  // read cart from localStorage once (no backend)
   useEffect(() => {
     setLoading(true);
-    const load = async () => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY) || "[]";
+      const parsed = JSON.parse(raw);
+      const arr = (Array.isArray(parsed) ? parsed : []).map((it) => normalizeLocalItem(it));
+      setItems(arr);
+      const totalQty = arr.reduce((s, it) => s + (Number(it.qty) || 0), 0);
       try {
-        const cartId = localStorage.getItem(CART_KEY);
-        if (cartId) {
-          try {
-            await refreshCartFromServer(cartId);
-            setLoading(false);
-            return;
-          } catch (e) {
-            console.warn("Failed to load from server, falling back to local", e);
-          }
-        }
-
-        // fallback: localStorage
-        const raw = localStorage.getItem(STORAGE_KEY);
-        const parsed = raw ? JSON.parse(raw) : [];
-        setItems(Array.isArray(parsed) ? parsed : []);
-      } catch (e) {
-        console.warn("Cart load error", e);
-        setItems([]);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    load();
-
-    // listen for cross-tab/page updates (homepage/productpage can dispatch this)
-    const onUpdated = (ev) => {
-      const detail = ev.detail || {};
-      if (detail.items) {
-        setItems(detail.items);
-      } else {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        const parsed = raw ? JSON.parse(raw) : [];
-        setItems(Array.isArray(parsed) ? parsed : []);
-      }
-    };
-    window.addEventListener("cartUpdated", onUpdated);
-
-    return () => window.removeEventListener("cartUpdated", onUpdated);
+        localStorage.setItem("guest_cart_count", String(totalQty));
+      } catch (e) {}
+      window.dispatchEvent(new CustomEvent("cartUpdated", { detail: { count: totalQty, items: arr } }));
+    } catch (e) {
+      console.warn("Cart load error", e);
+      setItems([]);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  // persist to localStorage whenever items change (and broadcast)
-  useEffect(() => {
+  // helper to persist given items to storage and broadcast
+  const saveAndBroadcast = (nextItems) => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+      const toStore = nextItems.map((it) => ({
+        id: it.id,
+        name: it.name,
+        unit_price: it.price,
+        line_total: typeof it.price === "number" ? it.price * (it.qty || 1) : null,
+        price_display: typeof it.price === "number" ? it.price.toLocaleString("vi-VN") + "₫" : "Liên hệ",
+        image_url: it.image_url,
+        quantity: it.qty,
+      }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(toStore));
+      const totalQty = toStore.reduce((s, it) => s + (Number(it.quantity) || 0), 0);
+      try {
+        localStorage.setItem("guest_cart_count", String(totalQty));
+      } catch (e) {}
+      window.dispatchEvent(new CustomEvent("cartUpdated", { detail: { count: totalQty, items: nextItems } }));
     } catch (e) {
       console.warn("Failed to save cart to storage", e);
     }
-  }, [items]);
-
-  // ---------- helpers for modifying cart (local + sync to server if cart exists) ----------
-  const createOrUpdateServerCartDetail = async (cartId, item) => {
-    // if item has cart_detail_id -> update via PUT
-    try {
-      if (!cartId) return;
-      if (item.cart_detail_id) {
-        const url = `${API_BASE}/api/cart-details/${item.cart_detail_id}`;
-        const body = { quantity: item.qty, note: item.note ?? null };
-        const res = await apiFetch(url, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) {
-          console.warn("PUT cart-detail failed", res.status);
-        }
-        return;
-      } else {
-        // create new cart-detail on server
-        const url = `${API_BASE}/api/cart-details`;
-        const payload = {
-          cart_id: Number(cartId),
-          product_detail_id: item.product_detail_id ?? item.id,
-          quantity: item.qty,
-          price: item.price ?? 0,
-          note: item.note ?? null,
-        };
-        const res = await apiFetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        if (!res.ok) {
-          const text = await res.text().catch(() => "");
-          console.warn("POST cart-detail failed", res.status, text);
-        }
-        return;
-      }
-    } catch (e) {
-      console.warn("createOrUpdateServerCartDetail error", e);
-    }
   };
 
-  const deleteServerCartDetail = async (cartId, cartDetailId) => {
-    if (!cartId || !cartDetailId) return;
-    try {
-      const url = `${API_BASE}/api/cart-details/${cartDetailId}`;
-      const res = await apiFetch(url, { method: "DELETE" });
-      if (!res.ok) {
-        console.warn("DELETE cart-detail failed", res.status);
-      }
-    } catch (e) {
-      console.warn("deleteServerCartDetail error", e);
-    }
+  // local modifications update state then persist immediately
+  const addQty = (id) => {
+    const next = items.map((i) => (i.id === id ? { ...i, qty: (Number(i.qty) || 1) + 1 } : i));
+    setItems(next);
+    saveAndBroadcast(next);
   };
 
-  // increase qty
-  const addQty = async (id) => {
-    setItems((prev) => {
-      const next = prev.map((i) => (i.id === id ? { ...i, qty: (i.qty || 1) + 1 } : i));
-      // optimistic UI update -> persist handled by effect
-      return next;
-    });
-
-    const cartId = localStorage.getItem(CART_KEY);
-    // find the updated item (after state update may be async, so compute here)
-    const current = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]").find((it) => it.id === id);
-    const itemToSync = current
-      ? { ...current, qty: (Number(current.qty || 1) + 1) }
-      : null;
-
-    if (itemToSync && cartId) {
-      await createOrUpdateServerCartDetail(cartId, itemToSync);
-      // refresh from server to get canonical cart_detail_id and totals
-      await refreshCartFromServer(cartId);
-    }
+  const subQty = (id) => {
+    const next = items.map((i) => (i.id === id ? { ...i, qty: Math.max(1, (Number(i.qty) || 1) - 1) } : i));
+    setItems(next);
+    saveAndBroadcast(next);
   };
 
-  // decrease qty (min 1)
-  const subQty = async (id) => {
-    setItems((prev) => {
-      const next = prev.map((i) => (i.id === id ? { ...i, qty: Math.max(1, (i.qty || 1) - 1) } : i));
-      return next;
-    });
-
-    const cartId = localStorage.getItem(CART_KEY);
-    const current = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]").find((it) => it.id === id);
-    const newQty = current ? Math.max(1, (Number(current.qty || 1) - 1)) : null;
-    if (current && cartId) {
-      const itemToSync = { ...current, qty: newQty };
-      await createOrUpdateServerCartDetail(cartId, itemToSync);
-      await refreshCartFromServer(cartId);
-    }
-  };
-
-  // update qty via input
-  const updateQty = async (id, value) => {
+  const updateQty = (id, value) => {
     const q = Math.max(1, Number(value || 1));
-    setItems((prev) => prev.map((i) => (i.id === id ? { ...i, qty: q } : i)));
-
-    const cartId = localStorage.getItem(CART_KEY);
-    const current = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]").find((it) => it.id === id);
-    if (current && cartId) {
-      const itemToSync = { ...current, qty: q };
-      await createOrUpdateServerCartDetail(cartId, itemToSync);
-      await refreshCartFromServer(cartId);
-    }
+    const next = items.map((i) => (i.id === id ? { ...i, qty: q } : i));
+    setItems(next);
+    saveAndBroadcast(next);
   };
 
-  // remove item
-  const removeItem = async (id) => {
-    // find item to get cart_detail_id
-    const current = items.find((it) => it.id === id);
-    setItems((prev) => prev.filter((i) => i.id !== id));
+  const removeItem = (id) => {
+    const next = items.filter((i) => i.id !== id);
+    setItems(next);
+    saveAndBroadcast(next);
     setSnack({ severity: "info", message: "Đã xoá sản phẩm" });
-
-    const cartId = localStorage.getItem(CART_KEY);
-    if (current && current.cart_detail_id && cartId) {
-      await deleteServerCartDetail(cartId, current.cart_detail_id);
-      await refreshCartFromServer(cartId);
-    } else {
-      // update localStorage and broadcast
-      const arr = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]").filter((it) => it.id !== id);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
-      const totalQty = arr.reduce((s, it) => s + (Number(it.qty) || 0), 0);
-      localStorage.setItem("guest_cart_count", String(totalQty));
-      window.dispatchEvent(new CustomEvent("cartUpdated", { detail: { count: totalQty, items: arr } }));
-    }
   };
 
-  const clearCart = async () => {
+  const clearCart = () => {
     setItems([]);
+    saveAndBroadcast([]);
     setSnack({ severity: "info", message: "Giỏ hàng đã được làm rỗng" });
-
-    const cartId = localStorage.getItem(CART_KEY);
-    if (cartId) {
-      // naive approach: delete each cart_detail on server (if many items, consider implementing bulk endpoint)
-      const raw = localStorage.getItem(STORAGE_KEY);
-      const parsed = raw ? JSON.parse(raw) : [];
-      for (const it of parsed) {
-        if (it.cart_detail_id) {
-          await deleteServerCartDetail(cartId, it.cart_detail_id);
-        }
-      }
-      await refreshCartFromServer(cartId);
-    } else {
-      localStorage.removeItem(STORAGE_KEY);
-      localStorage.setItem("guest_cart_count", "0");
-      window.dispatchEvent(new CustomEvent("cartUpdated", { detail: { count: 0, items: [] } }));
-    }
   };
 
   const subtotal = useMemo(() => {
@@ -342,75 +161,19 @@ export default function CartPage() {
       setSnack({ severity: "warning", message: "Giỏ hàng trống" });
       return;
     }
-    // If you require auth at checkout, you can check user auth status here and redirect to login if needed.
     setSnack({ severity: "success", message: "Tiến hành thanh toán (demo)" });
   };
 
-  // ensure image url absolute
   const normalizeImg = (u) => {
     if (!u) return "/images/posterdenim.png";
     if (typeof u !== "string") return "/images/posterdenim.png";
     return u.startsWith("http") ? u : `${API_BASE}/storage/${u}`;
   };
 
-  // UI
+  // UI: NO header/banner/footer here — MainLayout will provide them
   return (
     <ThemeProvider theme={theme}>
       <Box sx={{ minHeight: "100vh", backgroundColor: "background.default", pb: 6 }}>
-        {/* Thin top bar */}
-        <Box sx={{ backgroundColor: "#111827", color: "#fff", py: 0.5, fontSize: 12 }}>
-          <Container maxWidth="lg" sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <Box>Miễn phí giao hàng nội thành HCM từ 1.000.000₫</Box>
-            <Box>Liên hệ: webdemo@gmail.com — 09x.xxx.xxxx</Box>
-          </Container>
-        </Box>
-
-        {/* Header */}
-        <AppBar position="sticky" elevation={0} sx={{ backgroundColor: "#fff", borderBottom: "1px solid rgba(13,27,42,0.06)" }}>
-          <Container maxWidth="lg">
-            <Toolbar disableGutters sx={{ display: "flex", justifyContent: "space-between", py: 1 }}>
-              <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
-                <Box onClick={() => navigate("/")} sx={{ cursor: "pointer" }}>
-                  <Typography sx={{ fontWeight: 800, fontSize: 22, letterSpacing: 2, color: "#0D1B2A" }}>DENIM ON</Typography>
-                </Box>
-              </Box>
-
-              <Box sx={{ display: "flex", gap: 2, alignItems: "center" }}>
-                <Button onClick={() => navigate("/trang-chu")} sx={{ color: "#0D1B2A", textTransform: "none" }}>Trang chủ</Button>
-                <Button onClick={() => navigate("/collections")} sx={{ color: "#0D1B2A", textTransform: "none" }}>Sản phẩm</Button>
-              </Box>
-
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                <IconButton onClick={() => navigate("/wishlist")} aria-label="wishlist">
-                  <FavoriteBorderIcon sx={{ color: "#0D1B2A" }} />
-                </IconButton>
-                <IconButton onClick={() => navigate("/cart")} aria-label="cart">
-                  <Box sx={{ position: "relative", display: "inline-flex" }}>
-                    <ShoppingCartIcon sx={{ color: "#0D1B2A" }} />
-                    {items.length > 0 && (
-                      <Box sx={{
-                        position: "absolute",
-                        top: -8,
-                        right: -8,
-                        minWidth: 18,
-                        height: 18,
-                        borderRadius: "50%",
-                        backgroundColor: "#ef4444",
-                        color: "#fff",
-                        fontSize: 11,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        px: 0.5,
-                      }}>{items.reduce((s,i)=>s+(i.qty||0),0)}</Box>
-                    )}
-                  </Box>
-                </IconButton>
-              </Box>
-            </Toolbar>
-          </Container>
-        </AppBar>
-
         <Container maxWidth="lg" sx={{ mt: 6 }}>
           <Grid container spacing={4}>
             {/* Left: Cart items */}
@@ -516,24 +279,6 @@ export default function CartPage() {
             </Grid>
           </Grid>
         </Container>
-
-        {/* Footer */}
-        <Box sx={{ backgroundColor: "#0D1B2A", color: "#fff", py: 4, mt: 8 }}>
-          <Container maxWidth="lg">
-            <Grid container spacing={2}>
-              <Grid item xs={12} md={6}>
-                <Typography variant="h6" sx={{ fontWeight: 800 }}>DENIM ON</Typography>
-                <Typography variant="body2" sx={{ mt: 1 }}>Thời trang nam cao cấp — giao hàng toàn quốc.</Typography>
-              </Grid>
-              <Grid item xs={12} md={6} sx={{ display: "flex", justifyContent: "flex-end", alignItems: "center" }}>
-                <Stack direction="row" spacing={2}>
-                  <Button variant="outlined" color="inherit" onClick={() => navigate("/contact")}>Liên hệ</Button>
-                  <Button variant="contained" color="primary" onClick={() => navigate("/collections")}>Mua ngay</Button>
-                </Stack>
-              </Grid>
-            </Grid>
-          </Container>
-        </Box>
 
         <Snackbar open={!!snack} autoHideDuration={2500} onClose={() => setSnack(null)}>
           {snack ? <Alert onClose={() => setSnack(null)} severity={snack.severity}>{snack.message}</Alert> : null}

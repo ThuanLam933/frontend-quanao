@@ -269,8 +269,51 @@ export default function HomePage() {
   };
 
   const handleAddToCart = (p) => {
-    setCartCount((c) => c + 1);
-    setSnack({ severity: "success", message: `${p.name} đã thêm vào giỏ.` });
+    try {
+      // load existing cart from localStorage
+      const raw = localStorage.getItem("cart");
+      const cart = raw ? JSON.parse(raw) : [];
+
+      // ensure numeric unit price when available
+      const unitPrice =
+        typeof p.price === "number"
+          ? p.price
+          : p.price && !isNaN(parseFloat(p.price))
+          ? parseFloat(p.price)
+          : null;
+
+      // find existing item
+      const idx = cart.findIndex((it) => it.id === p.id);
+      if (idx >= 0) {
+        // increment quantity
+        cart[idx].quantity = (cart[idx].quantity || 1) + 1;
+        if (unitPrice != null) cart[idx].unit_price = unitPrice;
+        cart[idx].line_total = cart[idx].unit_price != null ? cart[idx].unit_price * cart[idx].quantity : null;
+      } else {
+        // add new item (store unit_price and line_total)
+        cart.push({
+          id: p.id,
+          name: p.name,
+          unit_price: unitPrice,
+          line_total: unitPrice != null ? unitPrice * 1 : null,
+          price_display: unitPrice != null ? unitPrice.toLocaleString("vi-VN") + "₫" : "Liên hệ",
+          image_url: p.image_url ?? null,
+          quantity: 1,
+        });
+      }
+
+      // persist
+      localStorage.setItem("cart", JSON.stringify(cart));
+
+      // update cartCount from total quantity
+      const totalQty = cart.reduce((s, it) => s + (it.quantity || 0), 0);
+      setCartCount(totalQty);
+
+      setSnack({ severity: "success", message: `${p.name} đã thêm vào giỏ.` });
+    } catch (e) {
+      console.warn("Cannot update cart in localStorage", e);
+      setSnack({ severity: "error", message: "Không thể lưu giỏ hàng." });
+    }
   };
 
   // Hero upload handlers (admin-only)
@@ -366,150 +409,11 @@ export default function HomePage() {
   // get hero image to use (dataUrl in localStorage has priority)
   const heroImageUrl = heroPosterDataUrl || "/images/hero-banner.jpg";
 
-  // render
+  // render only page content (header/banner/footer moved to MainLayout)
   return (
     <ThemeProvider theme={theme}>
       <Box sx={{ minHeight: "100vh", backgroundColor: "background.default" }}>
-        {/* thin info bar */}
-        <Box sx={{ backgroundColor: "#111827", color: "#fff", py: 0.5, fontSize: 12 }}>
-          <Container maxWidth="lg" sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <Box>Miễn phí giao hàng nội thành HCM từ 1.000.000₫</Box>
-            <Box>Liên hệ: webdemo@gmail.com — 09x.xxx.xxxx</Box>
-          </Container>
-        </Box>
-
-        {/* header */}
-        <AppBar position="sticky" elevation={0} sx={{ backgroundColor: "#fff", borderBottom: "1px solid rgba(13,27,42,0.06)" }}>
-          <Container maxWidth="lg">
-            <Toolbar disableGutters sx={{ display: "flex", justifyContent: "space-between", py: 1 }}>
-              {/* left: logo */}
-              <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
-                <Box onClick={() => navigate("/")} sx={{ cursor: "pointer" }}>
-                  <Typography sx={{ fontWeight: 800, fontSize: 22, letterSpacing: 2, color: "#0D1B2A" }}>DENIM ON</Typography>
-                </Box>
-              </Box>
-
-              {/* center: NAV */}
-              <Box sx={{ display: "flex", gap: 3, alignItems: "center" }}>
-                <Button onClick={() => navigate("/trang-chu")} sx={{ color: "#0D1B2A", textTransform: "none" }}>
-                  Trang chủ
-                </Button>
-                <Button onClick={() => navigate("/about")} sx={{ color: "#0D1B2A", textTransform: "none" }}>
-                  Giới thiệu
-                </Button>
-                <Button onClick={() => navigate("/collections")} sx={{ color: "#0D1B2A", textTransform: "none" }}>
-                  Sản phẩm
-                </Button>
-                <Button onClick={() => navigate("/policy")} sx={{ color: "#0D1B2A", textTransform: "none" }}>
-                  Chính sách
-                </Button>
-                <Button onClick={() => navigate("/contact")} sx={{ color: "#0D1B2A", textTransform: "none" }}>
-                  Liên hệ
-                </Button>
-              </Box>
-
-              {/* right: icons + hero upload (only show upload controls to admin) */}
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                {isAdmin ? (
-                  <>
-                    <Button variant="outlined" startIcon={<UploadIcon />} onClick={handleHeroUploadClick} sx={{ textTransform: "none", mr: 1 }}>
-                      Upload Hero Poster
-                    </Button>
-                    <Button variant="text" color="inherit" onClick={handleResetHero} startIcon={<DeleteIcon />}>
-                      Reset Hero
-                    </Button>
-                  </>
-                ) : null}
-
-                <input
-                  ref={heroInputRef}
-                  type="file"
-                  accept="image/*"
-                  style={{ display: "none" }}
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) onHeroFileSelected(f);
-                    e.target.value = "";
-                  }}
-                />
-
-                <IconButton onClick={() => navigate("/wishlist")} aria-label="wishlist">
-                  <FavoriteBorderIcon sx={{ color: "#0D1B2A" }} />
-                </IconButton>
-                <IconButton onClick={() => navigate("/cart")} aria-label="cart">
-                  <Box sx={{ position: "relative", display: "inline-flex" }}>
-                    <ShoppingCartIcon sx={{ color: "#0D1B2A" }} />
-                    {cartCount > 0 && (
-                      <Box
-                        sx={{
-                          position: "absolute",
-                          top: -8,
-                          right: -8,
-                          minWidth: 18,
-                          height: 18,
-                          borderRadius: "50%",
-                          backgroundColor: "#ef4444",
-                          color: "#fff",
-                          fontSize: 11,
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          px: 0.5,
-                        }}
-                      >
-                        {cartCount}
-                      </Box>
-                    )}
-                  </Box>
-                </IconButton>
-              </Box>
-            </Toolbar>
-          </Container>
-        </AppBar>
-
-        {/* HERO */}
-        <Box component="section" sx={{ width: "100%", mt: 0 }}>
-          <Box
-            sx={{
-              width: "100%",
-              height: { xs: 300, md: 520 },
-              backgroundImage: `url("${heroImageUrl}")`,
-              backgroundSize: "cover",
-              backgroundPosition: "center center",
-              display: "flex",
-              alignItems: "center",
-            }}
-          >
-            <Container maxWidth="lg">
-              <Grid container>
-                <Grid item xs={12} md={7} />
-                <Grid item xs={12} md={5} sx={{ display: "flex", alignItems: "center" }}>
-                  <Box sx={{ backgroundColor: "rgba(255,255,255,0.95)", p: 3, borderRadius: 1 }}>
-                    <Typography variant="h3" sx={{ fontWeight: 800, color: "#0D1B2A", mb: 1 }}>
-                      DENIM ON
-                    </Typography>
-                    <Typography variant="h5" sx={{ fontWeight: 600, color: "#0D1B2A", mb: 2 }}>
-                      SUMMER COLLECTION
-                    </Typography>
-                    <Typography variant="body1" sx={{ color: "#0D1B2A", mb: 2 }}>
-                      Only on DenimOn.com
-                    </Typography>
-                    <Stack direction="row" spacing={2}>
-                      <Button variant="contained" color="primary" onClick={() => navigate("/collections")}>
-                        Khám phá
-                      </Button>
-                      <Button variant="outlined" onClick={() => navigate("/collections?new=1")}>
-                        Mua ngay
-                      </Button>
-                    </Stack>
-                  </Box>
-                </Grid>
-              </Grid>
-            </Container>
-          </Box>
-        </Box>
-
-        {/* Category tiles (4) */}
+        {/* Category tiles */}
         <Container maxWidth="lg" sx={{ mt: 6 }}>
           <Grid container spacing={3}>
             {categoryTiles.map((c) => (
@@ -524,6 +428,7 @@ export default function HomePage() {
                     borderRadius: 1,
                     "&:hover .overlay": { opacity: 0.95 },
                   }}
+                  onClick={() => navigate(c.to)}
                 >
                   <Box
                     component="img"
@@ -582,7 +487,7 @@ export default function HomePage() {
           </Grid>
         </Container>
 
-        {/* New Arrivals / Product Grid */}
+        {/* Products grid */}
         <Container maxWidth="lg" sx={{ mt: 8, mb: 8 }}>
           <Typography variant="h5" sx={{ fontWeight: 800, mb: 3 }}>
             New Arrivals
@@ -640,70 +545,6 @@ export default function HomePage() {
             </>
           )}
         </Container>
-
-        {/* Footer */}
-        <Box sx={{ backgroundColor: "#0D1B2A", color: "#fff", py: 4 }}>
-          <Container maxWidth="lg">
-            <Grid container spacing={2}>
-              <Grid item xs={12} md={6}>
-                <Typography variant="h6" sx={{ fontWeight: 800 }}>
-                  DENIM ON
-                </Typography>
-                <Typography variant="body2" sx={{ mt: 1 }}>
-                  Thời trang nam cao cấp — giao hàng toàn quốc.
-                </Typography>
-              </Grid>
-              <Grid item xs={12} md={6} sx={{ display: "flex", justifyContent: "flex-end", alignItems: "center" }}>
-                <Stack direction="row" spacing={2}>
-                  <Button variant="outlined" color="inherit" onClick={() => navigate("/contact")}>
-                    Liên hệ
-                  </Button>
-                  <Button variant="contained" color="primary" onClick={() => navigate("/collections")}>
-                    Mua ngay
-                  </Button>
-                </Stack>
-              </Grid>
-            </Grid>
-          </Container>
-        </Box>
-
-        {/* Category Upload Dialog (admin-only) */}
-        <Dialog open={catDialogOpen} onClose={closeCatDialog}>
-          <DialogTitle>Upload ảnh cho {catDialogTarget?.title ?? ""}</DialogTitle>
-          <DialogContent>
-            <Typography variant="body2" sx={{ mb: 2 }}>
-              Ảnh sẽ lưu vào trình duyệt của bạn (localStorage) để xem thử. Muốn dùng ảnh công khai, hãy đặt file trong /public/images/.
-            </Typography>
-            <input
-              ref={catInputRef}
-              type="file"
-              accept="image/*"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) onCatFileSelected(f);
-                e.target.value = "";
-              }}
-            />
-            <Box sx={{ mt: 2 }}>
-              {isAdmin ? (
-                <Button
-                  variant="outlined"
-                  color="error"
-                  startIcon={<DeleteIcon />}
-                  onClick={() => {
-                    if (!catDialogTarget) return;
-                    handleRemoveCatImage(catDialogTarget.slug || catDialogTarget.id);
-                  }}
-                >
-                  Xóa ảnh đã lưu (nếu có)
-                </Button>
-              ) : null}
-            </Box>
-          </DialogContent>
-          <DialogActions>
-            <Button onClick={closeCatDialog}>Đóng</Button>
-          </DialogActions>
-        </Dialog>
 
         {/* Snackbar */}
         <Snackbar open={!!snack} autoHideDuration={2500} onClose={() => setSnack(null)}>
