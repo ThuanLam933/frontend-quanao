@@ -161,7 +161,10 @@ export default function CartPage() {
       setSnack({ severity: "warning", message: "Giỏ hàng trống" });
       return;
     }
-    setSnack({ severity: "success", message: "Tiến hành thanh toán (demo)" });
+    setSnack({ severity: "success", message: "Chuyển đến trang thanh toán..." });
+    setTimeout(() => {
+      navigate("/payment");
+    }, 400);
   };
 
   const normalizeImg = (u) => {

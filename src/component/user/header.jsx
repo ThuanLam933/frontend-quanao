@@ -2,6 +2,8 @@ import React, { useEffect, useState } from "react";
 import { AppBar, Toolbar, Container, Box, IconButton, Button, Typography, Badge } from "@mui/material";
 import ShoppingCartIcon from "@mui/icons-material/ShoppingCart";
 import FavoriteBorderIcon from "@mui/icons-material/FavoriteBorder";
+import AccountCircleIcon from "@mui/icons-material/AccountCircle";
+
 import { useNavigate } from "react-router-dom";
 
 export default function Header() {
@@ -43,8 +45,11 @@ export default function Header() {
             <Button onClick={() => navigate("/collections")} sx={{ color: "#0D1B2A", textTransform: "none" }}>Sản phẩm</Button>
             <Button onClick={() => navigate("/contact")} sx={{ color: "#0D1B2A", textTransform: "none" }}>Liên hệ</Button>
           </Box>
-
+          
           <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <IconButton onClick={() => navigate("/account")} aria-label="user account">
+              <AccountCircleIcon sx={{ color: "#0D1B2A" }} />
+            </IconButton>
             <IconButton onClick={() => navigate("/wishlist")} aria-label="wishlist">
               <FavoriteBorderIcon sx={{ color: "#0D1B2A" }} />
             </IconButton>

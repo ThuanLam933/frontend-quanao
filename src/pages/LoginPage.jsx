@@ -225,7 +225,7 @@ export default function LoginPage() {
                     </Link>
                   </Grid>
                   <Grid item>
-                    <Link href="#" variant="body2" sx={{ color: "#64B5F6" }}>
+                    <Link href="/register" variant="body2" sx={{ color: "#64B5F6" }}>
                       Tạo tài khoản
                     </Link>
                   </Grid>
