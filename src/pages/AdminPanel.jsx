@@ -170,28 +170,59 @@ function DashboardPage({ setSnack }) {
   const [loading, setLoading] = useState(false);
 
   const fetchStats = useCallback(async () => {
-    setLoading(true);
-    try {
-      // example many backends don't have a dashboard endpoint.
-      // Try a safe approach: call several endpoints to compute simple stats
-      const [pRes, oRes, uRes] = await Promise.all([
-        fetch(`${API_BASE}/api/product-details`),
-        fetch(`${API_BASE}/api/carts`),
-        fetch(`${API_BASE}/api/users`),
-      ]);
-      const [p, o, u] = await Promise.all([pRes.json().catch(()=>[]), oRes.json().catch(()=>[]), uRes.json().catch(()=>[])]);
-      setStats({
-        products: Array.isArray(p) ? p.length : (p.total ?? p.data?.length ?? 0),
-        orders: Array.isArray(o) ? o.length : (o.total ?? o.data?.length ?? 0),
-        users: Array.isArray(u) ? u.length : (u.total ?? u.data?.length ?? 0),
-      });
-    } catch (err) {
-      console.warn("dashboard fetch error", err);
-      setSnack({ severity: "error", message: "Không thể tải số liệu dashboard." });
-    } finally {
-      setLoading(false);
+  setLoading(true);
+  try {
+    const token = localStorage.getItem("access_token");
+
+    const fetchWithAuth = (url) =>
+      fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+
+    const [pRes, oRes, uRes] = await Promise.all([
+      fetch(`${API_BASE}/api/product-details`),
+      fetchWithAuth(`${API_BASE}/api/orders`),
+
+      fetchWithAuth(`${API_BASE}/api/admin/users`),
+    ]);
+
+    const [p, o, u] = await Promise.all([
+      pRes.ok ? pRes.json().catch(()=>[]) : [],
+      oRes.ok ? oRes.json().catch(()=>[]) : [],
+      uRes.ok ? uRes.json().catch(()=>[]) : [],
+    ]);
+
+    // Normalize users
+    let uArr = [];
+    if (Array.isArray(u)) uArr = u;
+    else if (Array.isArray(u.data)) uArr = u.data;
+
+    // -------- FIX ORDER COUNT --------
+    let orderCount = 0;
+
+    if (typeof o === "object" && o !== null) {
+      if (typeof o.total === "number") {
+        orderCount = o.total; // BEST CASE
+      } else if (Array.isArray(o.data)) {
+        orderCount = o.data.length; // fallback
+      } else if (Array.isArray(o)) {
+        orderCount = o.length; // fallback mảng
+      }
     }
-  }, [setSnack]);
+
+    setStats({
+      products: Array.isArray(p) ? p.length : (p.total ?? p.data?.length ?? 0),
+      orders: orderCount,
+      users: uArr.filter(x => x.role === "user").length,
+    });
+
+  } catch (err) {
+    console.warn("dashboard fetch error", err);
+    setSnack({ severity: "error", message: "Không thể tải số liệu dashboard." });
+  } finally {
+    setLoading(false);
+  }
+}, [setSnack]);
+
+
 
   useEffect(() => { fetchStats(); }, [fetchStats]);
 
@@ -1010,73 +1041,135 @@ function OrdersPage({ setSnack }) {
   const [loading, setLoading] = useState(false);
   const [sel, setSel] = useState(null);
 
+  // -------------------------------
+  // FETCH ORDERS (ADMIN GET ALL)
+  // -------------------------------
   const fetchOrders = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/carts`);
+      const token = localStorage.getItem("access_token");
+
+      const res = await fetch(`${API_BASE}/api/orders-all`, {
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        }
+      });
+
       if (!res.ok) throw new Error("Orders fetch failed");
+
       const data = await res.json();
-      const arr = Array.isArray(data) ? data : (data.data ?? data.items ?? []);
+      const arr = Array.isArray(data) ? data : data.data ?? [];
+
       setOrders(arr);
     } catch (err) {
       console.error(err);
-      setSnack({ severity: "error", message: "Không tải orders" });
+      setSnack({ severity: "error", message: "Không tải danh sách đơn hàng!" });
       setOrders([]);
-    } finally { setLoading(false); }
+    } finally {
+      setLoading(false);
+    }
   }, [setSnack]);
 
-  useEffect(()=> { fetchOrders(); }, [fetchOrders]);
+  useEffect(() => {
+    fetchOrders();
+  }, [fetchOrders]);
 
   const handleView = (o) => setSel(o);
+
+  // -------------------------------
+  // UPDATE STATUS (ADMIN)
+  // -------------------------------
   const changeStatus = async (orderId, status) => {
     const token = localStorage.getItem("access_token");
+
     try {
-      const res = await fetch(`${API_BASE}/api/carts/${orderId}`, {
+      const res = await fetch(`${API_BASE}/api/orders/${orderId}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        body: JSON.stringify({ status }),
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({ status })
       });
-      if (!res.ok) throw new Error("status update failed");
-      setSnack({ severity: "success", message: "Updated" });
+
+      if (!res.ok) throw new Error("Status update failed");
+
+      setSnack({ severity: "success", message: "Cập nhật trạng thái thành công!" });
       fetchOrders();
     } catch (err) {
       console.error(err);
-      setSnack({ severity: "error", message: "Cập nhật thất bại" });
+      setSnack({ severity: "error", message: "Cập nhật thất bại!" });
     }
   };
 
   return (
     <Box>
-      <Stack direction="row" justifyContent="space-between" sx={{ mb:2 }}>
-        <Typography variant="h6">Orders</Typography>
+      <Stack direction="row" justifyContent="space-between" sx={{ mb: 2 }}>
+        <Typography variant="h6">Orders (Admin)</Typography>
         <Button onClick={fetchOrders}>Refresh</Button>
       </Stack>
 
       <Paper>
-        {loading ? <Box sx={{ p:3, display:"flex", justifyContent:"center" }}><CircularProgress/></Box> : (
+        {loading ? (
+          <Box sx={{ p: 3, display: "flex", justifyContent: "center" }}>
+            <CircularProgress />
+          </Box>
+        ) : (
           <TableContainer>
             <Table>
               <TableHead>
                 <TableRow>
                   <TableCell>#</TableCell>
                   <TableCell>User</TableCell>
+                  <TableCell>Customer Name</TableCell>
                   <TableCell>Total</TableCell>
+                  <TableCell>Payment</TableCell>
                   <TableCell>Status</TableCell>
                   <TableCell>Actions</TableCell>
                 </TableRow>
               </TableHead>
+
               <TableBody>
-                {orders.map(o => (
+                {orders.map((o) => (
                   <TableRow key={o.id}>
                     <TableCell>{o.id}</TableCell>
-                    <TableCell>{o.user_id ?? o.customer_name ?? "-"}</TableCell>
-                    <TableCell>{o.Total_price ? Number(o.Total_price).toLocaleString("vi-VN") + "₫" : "-"}</TableCell>
-                    <TableCell>{o.status ?? "-"}</TableCell>
-                    <TableCell>{o.categories_id ?? "-"}</TableCell>
-                    <TableCell>{o.image ?? "-"}</TableCell>
+                    <TableCell>{o.user?.email ?? "—"}</TableCell>
+                    <TableCell>{o.name ?? "—"}</TableCell>
+
                     <TableCell>
-                      <Button size="small" startIcon={<VisibilityIcon/>} onClick={()=> handleView(o)}>View</Button>
-                      <Button size="small" onClick={()=> changeStatus(o.id, "processing")}>Processing</Button>
+                      {o.total_price
+                        ? Number(o.total_price).toLocaleString("vi-VN") + "₫"
+                        : "—"}
+                    </TableCell>
+
+                    <TableCell>{o.payment_method ?? "—"}</TableCell>
+                    <TableCell>{o.status ?? "—"}</TableCell>
+
+                    <TableCell>
+                      <Button
+                        size="small"
+                        startIcon={<VisibilityIcon />}
+                        onClick={() => handleView(o)}
+                      >
+                        View
+                      </Button>
+
+                      {/* Demo update status */}
+                      <Button
+                        size="small"
+                        onClick={() => changeStatus(o.id, "confirmed")}
+                      >
+                        Confirm
+                      </Button>
+
+                      <Button
+                        size="small"
+                        onClick={() => changeStatus(o.id, "cancelled")}
+                        color="error"
+                      >
+                        Cancel
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -1086,46 +1179,106 @@ function OrdersPage({ setSnack }) {
         )}
       </Paper>
 
-      <Dialog open={!!sel} onClose={()=> setSel(null)} maxWidth="md" fullWidth>
+      {/* ---------------------- Dialog detail ---------------------- */}
+      <Dialog open={!!sel} onClose={() => setSel(null)} maxWidth="md" fullWidth>
         <DialogTitle>Order #{sel?.id}</DialogTitle>
         <DialogContent>
-          <Typography variant="subtitle2">Items</Typography>
-          {sel?.items ? sel.items.map(it => (<Box key={it.id}>{it.name} x{it.qty}</Box>)) : <Typography>—</Typography>}
-          <Typography sx={{ mt:2 }}>Total: {sel?.Total_price}</Typography>
+          <Typography>Email: {sel?.email}</Typography>
+          <Typography>Phone: {sel?.phone}</Typography>
+          <Typography>Address: {sel?.address}</Typography>
+          <Typography sx={{ mt: 2 }}>
+            Total Price:{" "}
+            {sel?.total_price
+              ? Number(sel.total_price).toLocaleString("vi-VN") + "₫"
+              : "—"}
+          </Typography>
         </DialogContent>
-        <DialogActions><Button onClick={()=> setSel(null)}>Close</Button></DialogActions>
+        <DialogActions>
+          <Button onClick={() => setSel(null)}>Close</Button>
+        </DialogActions>
       </Dialog>
     </Box>
   );
 }
+
 
 /* ---------------------- Users ---------------------- */
 function UsersPage({ setSnack }) {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(false);
 
+  // --- Hàm lấy token an toàn ---
+  const getStoredToken = () => {
+    let token =
+      localStorage.getItem("access_token") ||
+      localStorage.getItem("token") ||
+      null;
+
+    if (!token) return null;
+
+    try {
+      const maybe = JSON.parse(token);
+      if (typeof maybe === "string") token = maybe;
+    } catch (e) {}
+
+    return String(token).trim();
+  };
+
+  // --- Fetch Users ---
   const fetchUsers = useCallback(async () => {
     setLoading(true);
+
     try {
-      const res = await fetch(`${API_BASE}/api/users`);
+      const token = getStoredToken();
+      console.log("Token dùng để fetch:", token);
+
+      const res = await fetch("http://127.0.0.1:8000/api/admin/users", {
+        method: "GET",
+        headers: {
+          "Accept": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        }
+      });
+
       if (!res.ok) throw new Error("users fetch failed");
+
       const data = await res.json();
       const arr = Array.isArray(data) ? data : data.data ?? data.items ?? [];
+
       setUsers(arr);
     } catch (err) {
       console.error(err);
       setSnack({ severity: "error", message: "Không tải users" });
       setUsers([]);
-    } finally { setLoading(false); }
+    } finally {
+      setLoading(false);
+    }
   }, [setSnack]);
 
-  useEffect(()=> { fetchUsers(); }, [fetchUsers]);
+  useEffect(() => {
+    fetchUsers();
+  }, [fetchUsers]);
 
+  // --- Toggle Lock / Unlock ---
   const toggleLock = async (u) => {
-    const token = localStorage.getItem("access_token");
+    const token = getStoredToken();
+
     try {
-      const res = await fetch(`${API_BASE}/api/users/${u.id}/toggle-lock`, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(
+        `http://127.0.0.1:8000/api/admin/users/${u.id}/toggle-lock`,
+        {
+          method: "POST",
+          headers: {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {})
+          },
+          body: JSON.stringify({})
+        }
+      );
+
       if (!res.ok) throw new Error("toggle failed");
+
       setSnack({ severity: "success", message: "Cập nhật user" });
       fetchUsers();
     } catch (err) {
@@ -1135,33 +1288,96 @@ function UsersPage({ setSnack }) {
   };
 
   return (
-    <Box>
-      <Stack direction="row" justifyContent="space-between" sx={{ mb:2 }}>
-        <Typography variant="h6">Users</Typography>
-        <Button onClick={fetchUsers}>Refresh</Button>
-      </Stack>
+  <Box>
+    <Stack direction="row" justifyContent="space-between" sx={{ mb: 2 }}>
+      <Typography variant="h6">Users</Typography>
+      <Button onClick={fetchUsers}>Refresh</Button>
+    </Stack>
 
-      <Paper>
-        {loading ? <Box sx={{ p:3, display:"flex", justifyContent:"center" }}><CircularProgress/></Box> : (
-          <TableContainer>
-            <Table>
-              <TableHead>
-                <TableRow><TableCell>#</TableCell><TableCell>Email</TableCell><TableCell>Name</TableCell><TableCell>Actions</TableCell></TableRow>
-              </TableHead>
-              <TableBody>
-                {users.map(u => (
-                  <TableRow key={u.id}><TableCell>{u.id}</TableCell><TableCell>{u.email}</TableCell><TableCell>{u.name}</TableCell>
-                    <TableCell><Button size="small" onClick={()=> toggleLock(u)}>{u.locked ? "Unlock" : "Lock"}</Button></TableCell>
+    <Paper>
+      {loading ? (
+        <Box sx={{ p: 3, display: "flex", justifyContent: "center" }}>
+          <CircularProgress />
+        </Box>
+      ) : (
+        <TableContainer>
+          <Table>
+            <TableHead>
+              <TableRow>
+                <TableCell>#</TableCell>
+                <TableCell>Email</TableCell>
+                <TableCell>Name</TableCell>
+                <TableCell>Verified</TableCell>
+                <TableCell>Created</TableCell>
+                <TableCell>Actions</TableCell>
+              </TableRow>
+            </TableHead>
+
+            <TableBody>
+              {users.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={6} align="center" sx={{ py: 6 }}>
+                    Không có users
+                  </TableCell>
+                </TableRow>
+              ) : (
+                users.map((u) => (
+                  <TableRow key={u.id}>
+                    <TableCell>{u.id}</TableCell>
+                    <TableCell>{u.email ?? "—"}</TableCell>
+                    <TableCell>{u.name ?? "—"}</TableCell>
+                    <TableCell>
+                      {u.email_verified_at ? (
+                        <Typography component="span" variant="body2" color="success.main">
+                          Yes
+                        </Typography>
+                      ) : (
+                        <Typography component="span" variant="body2" color="text.secondary">
+                          No
+                        </Typography>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      {u.created_at
+                        ? new Date(u.created_at).toLocaleString()
+                        : u.updated_at
+                        ? new Date(u.updated_at).toLocaleString()
+                        : "—"}
+                    </TableCell>
+
+                    <TableCell>
+                      <Button
+                        size="small"
+                        onClick={() => toggleLock(u)}
+                        sx={{ mr: 1 }}
+                        disabled={!u.id}
+                      >
+                        {u.locked ? "Unlock" : "Lock"}
+                      </Button>
+
+                      {/* Example: view details button (optional) */}
+                      <Button
+                        size="small"
+                        onClick={() => {
+                          // open details or navigate — replace with your logic
+                          console.log("View user", u.id);
+                        }}
+                      >
+                        View
+                      </Button>
+                    </TableCell>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </TableContainer>
-        )}
-      </Paper>
-    </Box>
-  );
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      )}
+    </Paper>
+  </Box>
+);
 }
+
 
 /* ---------------------- Returns ---------------------- */
 function ReturnsPage({ setSnack }) {
