@@ -1,5 +1,5 @@
 // src/pages/HomePage.jsx
-import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import {
   AppBar,
   Toolbar,
@@ -9,7 +9,6 @@ import {
   Container,
   Grid,
   Button,
-  Avatar,
   Paper,
   Stack,
   CircularProgress,
@@ -20,25 +19,15 @@ import {
   CardMedia,
   CardContent,
   CardActions,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Input,
-  Tooltip,
 } from "@mui/material";
 import ShoppingCartIcon from "@mui/icons-material/ShoppingCart";
 import FavoriteBorderIcon from "@mui/icons-material/FavoriteBorder";
-import UploadIcon from "@mui/icons-material/Upload";
-import DeleteIcon from "@mui/icons-material/Delete";
-import CameraAltIcon from "@mui/icons-material/CameraAlt";
 import { createTheme, ThemeProvider } from "@mui/material/styles";
 import { useNavigate, createSearchParams } from "react-router-dom";
 
 /**
- * HomePage with admin-only poster uploads.
- * - Non-admin users will NOT see or be able to use upload controls.
- * - Replace API_BASE if your backend uses a different origin/port.
+ * HomePage (user-facing) — upload-related UI removed.
+ * Replace API_BASE if your backend uses a different origin/port.
  */
 
 const API_BASE = "http://127.0.0.1:8000";
@@ -72,88 +61,15 @@ export default function HomePage() {
   const [snack, setSnack] = useState(null);
   const [cartCount, setCartCount] = useState(0);
 
-  // local poster state keys
-  const HERO_KEY = "home_hero_poster";
-  const CAT_KEY_PREFIX = "cat_img_";
-
-  // upload refs
-  const heroInputRef = useRef(null);
-  const catInputRef = useRef(null);
-
-  // dialog for category image upload
-  const [catDialogOpen, setCatDialogOpen] = useState(false);
-  const [catDialogTarget, setCatDialogTarget] = useState(null); // { id, slug, title }
-
-  // Load saved hero poster (dataURL) from localStorage
-  const [heroPosterDataUrl, setHeroPosterDataUrl] = useState(() => {
-    try {
-      return localStorage.getItem(HERO_KEY) || null;
-    } catch {
-      return null;
-    }
-  });
-
-  // helpers for category saved images
-  const getSavedCatImg = (slugOrId) => {
-    try {
-      return localStorage.getItem(CAT_KEY_PREFIX + slugOrId) || null;
-    } catch {
-      return null;
-    }
-  };
-  const setSavedCatImg = (slugOrId, dataUrl) => {
-    try {
-      localStorage.setItem(CAT_KEY_PREFIX + slugOrId, dataUrl);
-    } catch (e) {
-      console.warn("Cannot save cat image to localStorage:", e);
-    }
-  };
-  const removeSavedCatImg = (slugOrId) => {
-    try {
-      localStorage.removeItem(CAT_KEY_PREFIX + slugOrId);
-    } catch {}
-  };
-
-  // ---------- Admin check ----------
-  const isAdminUser = useCallback(() => {
-    try {
-      const raw = localStorage.getItem("user");
-      if (!raw) return false;
-      const user = JSON.parse(raw);
-      if (!user || typeof user !== "object") return false;
-
-      if (user.is_admin === true) return true;
-      if (user.isAdmin === true) return true;
-      if (user.admin === true) return true;
-
-      if (user.role && typeof user.role === "string" && user.role.toLowerCase().includes("admin")) return true;
-
-      if (user.roles && Array.isArray(user.roles) && user.roles.some((r) => String(r).toLowerCase().includes("admin")))
-        return true;
-
-      if (user.data && typeof user.data === "object") {
-        const nested = user.data;
-        if (nested.role && typeof nested.role === "string" && nested.role.toLowerCase().includes("admin")) return true;
-        if (nested.is_admin === true) return true;
-      }
-
-      return false;
-    } catch (e) {
-      console.warn("isAdminUser parse error", e);
-      return false;
-    }
-  }, []);
-
-  const isAdmin = isAdminUser();
-
-  // Fetch categories (optional)
+  // ---------- Fetch categories ----------
   const fetchCategories = useCallback(async () => {
     setLoadingCategories(true);
     try {
-      const res = await fetch(`${API_BASE}/api/categories`);
+      const res = await fetch(`${API_BASE}/api/categories/`);
       if (!res.ok) throw new Error(`Categories fetch failed: ${res.status}`);
       const data = await res.json();
-      setCategories(data || []);
+      // Expecting an array; if backend wraps, adapt as needed
+      setCategories(Array.isArray(data) ? data : data || []);
     } catch (err) {
       console.warn("Categories load:", err);
       setCategories([]); // fallback empty
@@ -162,19 +78,19 @@ export default function HomePage() {
     }
   }, []);
 
-  // Fetch products
+  // ---------- Fetch products ----------
   const fetchProducts = useCallback(async () => {
     setLoadingProducts(true);
     setError(null);
 
     try {
-      const res = await fetch(`${API_BASE}/api/products`);
+      const res = await fetch(`${API_BASE}/api/products/`);
       if (!res.ok) throw new Error(`Products fetch failed: ${res.status}`);
 
       const data = await res.json();
 
-      const normalized = (data || []).map((p) => {
-        const firstDetail = p.details?.[0] ?? {}; // lấy chi tiết đầu tiên nếu có
+      const normalized = (Array.isArray(data) ? data : data || []).map((p) => {
+        const firstDetail = p.details?.[0] ?? {};
         const price =
           typeof firstDetail.price === "string" || typeof firstDetail.price === "number"
             ? parseFloat(firstDetail.price)
@@ -202,7 +118,7 @@ export default function HomePage() {
         };
       });
 
-      console.log("✅ Products normalized:", normalized); // log ra xem dữ liệu đã chuẩn chưa
+      console.log("✅ Products normalized:", normalized);
       setProducts(normalized);
     } catch (err) {
       console.error("❌ Fetch products error:", err);
@@ -217,17 +133,18 @@ export default function HomePage() {
     fetchProducts();
   }, [fetchCategories, fetchProducts]);
 
-  // category tiles (prefer real categories, fallback to static)
+  // category tiles (no localStorage overrides, just use category data or static fallback)
   const categoryTiles = useMemo(() => {
     if (categories && categories.length > 0) {
       return categories.map((c, i) => {
         const slugOrName = c.slug ?? c.name ?? `cat-${i}`;
-        const saved = getSavedCatImg(slugOrName);
         return {
           id: c.id ?? i,
           title: (c.name || "Danh mục").toUpperCase(),
           slug: slugOrName,
-          img: saved || `/images/cat-${slugOrName.toString().toLowerCase().replace(/\s+/g, "-")}.jpg`,
+          img: c.image_url
+            ? (c.image_url.startsWith("http") ? c.image_url : `${API_BASE}/storage/${c.image_url}`)
+            : `/images/cat-${slugOrName.toString().toLowerCase().replace(/\s+/g, "-")}.jpg`,
           to: `/collections?${createSearchParams({ category: c.slug ?? c.name })}`,
         };
       });
@@ -262,7 +179,7 @@ export default function HomePage() {
     return filtered.slice(start, start + PAGE_SIZE);
   }, [filtered, page]);
 
-  //util
+  // util
   const safePrice = (price) => {
     if (price == null || typeof price !== "number" || price <= 0) return "Liên hệ";
     return price.toLocaleString("vi-VN") + "₫";
@@ -270,11 +187,9 @@ export default function HomePage() {
 
   const handleAddToCart = (p) => {
     try {
-      // load existing cart from localStorage
       const raw = localStorage.getItem("cart");
       const cart = raw ? JSON.parse(raw) : [];
 
-      // ensure numeric unit price when available
       const unitPrice =
         typeof p.price === "number"
           ? p.price
@@ -282,15 +197,12 @@ export default function HomePage() {
           ? parseFloat(p.price)
           : null;
 
-      // find existing item
       const idx = cart.findIndex((it) => it.id === p.id);
       if (idx >= 0) {
-        // increment quantity
         cart[idx].quantity = (cart[idx].quantity || 1) + 1;
         if (unitPrice != null) cart[idx].unit_price = unitPrice;
         cart[idx].line_total = cart[idx].unit_price != null ? cart[idx].unit_price * cart[idx].quantity : null;
       } else {
-        // add new item (store unit_price and line_total)
         cart.push({
           id: p.id,
           name: p.name,
@@ -302,10 +214,8 @@ export default function HomePage() {
         });
       }
 
-      // persist
       localStorage.setItem("cart", JSON.stringify(cart));
 
-      // update cartCount from total quantity
       const totalQty = cart.reduce((s, it) => s + (it.quantity || 0), 0);
       setCartCount(totalQty);
 
@@ -316,100 +226,6 @@ export default function HomePage() {
     }
   };
 
-  // Hero upload handlers (admin-only)
-  const onHeroFileSelected = async (file) => {
-    if (!file) return;
-    if (!isAdmin) {
-      setSnack({ severity: "error", message: "Bạn không có quyền tải ảnh." });
-      return;
-    }
-    const maxSizeMB = 5;
-    if (file.size / 1024 / 1024 > maxSizeMB) {
-      setSnack({ severity: "error", message: `Ảnh quá lớn. Vui lòng chọn < ${maxSizeMB}MB.` });
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result;
-      try {
-        localStorage.setItem(HERO_KEY, dataUrl);
-        setHeroPosterDataUrl(dataUrl);
-        setSnack({ severity: "success", message: "Đã cập nhật hero poster." });
-      } catch (e) {
-        console.warn("Cannot save hero to localStorage", e);
-        setSnack({ severity: "error", message: "Không thể lưu ảnh (localStorage đầy?)." });
-      }
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleHeroUploadClick = () => {
-    if (!isAdmin) {
-      setSnack({ severity: "error", message: "Bạn không có quyền." });
-      return;
-    }
-    heroInputRef.current?.click();
-  };
-
-  const handleResetHero = () => {
-    if (!isAdmin) {
-      setSnack({ severity: "error", message: "Bạn không có quyền." });
-      return;
-    }
-    try {
-      localStorage.removeItem(HERO_KEY);
-    } catch {}
-    setHeroPosterDataUrl(null);
-    setSnack({ severity: "info", message: "Đã reset hero poster về mặc định." });
-  };
-
-  // Category upload dialog (admin-only)
-  const openCatDialog = (tile) => {
-    if (!isAdmin) {
-      setSnack({ severity: "error", message: "Bạn không có quyền tải ảnh danh mục." });
-      return;
-    }
-    setCatDialogTarget(tile);
-    setCatDialogOpen(true);
-  };
-  const closeCatDialog = () => {
-    setCatDialogOpen(false);
-    setCatDialogTarget(null);
-  };
-
-  const onCatFileSelected = (file) => {
-    if (!file || !catDialogTarget) return;
-    if (!isAdmin) {
-      setSnack({ severity: "error", message: "Bạn không có quyền." });
-      return;
-    }
-    const slug = catDialogTarget.slug || catDialogTarget.id;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result;
-      setSavedCatImg(slug, dataUrl);
-      // refresh categories state to regenerate categoryTiles img
-      setCategories((prev) => prev.slice());
-      setSnack({ severity: "success", message: `Đã cập nhật ảnh cho ${catDialogTarget.title}.` });
-      closeCatDialog();
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleRemoveCatImage = (slug) => {
-    if (!isAdmin) {
-      setSnack({ severity: "error", message: "Bạn không có quyền." });
-      return;
-    }
-    removeSavedCatImg(slug);
-    setCategories((prev) => prev.slice());
-    setSnack({ severity: "info", message: "Đã xóa ảnh category (nếu có)." });
-  };
-
-  // get hero image to use (dataUrl in localStorage has priority)
-  const heroImageUrl = heroPosterDataUrl || "/images/hero-banner.jpg";
-
-  // render only page content (header/banner/footer moved to MainLayout)
   return (
     <ThemeProvider theme={theme}>
       <Box sx={{ minHeight: "100vh", backgroundColor: "background.default" }}>
@@ -434,7 +250,7 @@ export default function HomePage() {
                     component="img"
                     src={c.img}
                     alt={c.title}
-                    onError={(e) => (e.currentTarget.src = "/images/pnv1.jpg")}
+                    onError={(e) => (e.currentTarget.src = "/images/quanxanh2.jpg")}
                     sx={{
                       width: "100%",
                       height: "100%",
@@ -461,26 +277,10 @@ export default function HomePage() {
                     }}
                     onClick={() => navigate(c.to)}
                   >
-                    <Typography sx={{ fontWeight: 800, fontSize: { xs: 18, md: 26 }, letterSpacing: 1.2 }}>{c.title}</Typography>
+                    <Typography sx={{ fontWeight: 800, fontSize: { xs: 18, md: 26 }, letterSpacing: 1.2 }}>
+                      {c.title}
+                    </Typography>
                   </Box>
-
-                  {/* show camera button only to admin */}
-                  {isAdmin ? (
-                    <Box sx={{ position: "absolute", top: 8, right: 8 }}>
-                      <Tooltip title="Upload ảnh category">
-                        <IconButton
-                          size="small"
-                          sx={{ bgcolor: "rgba(255,255,255,0.85)" }}
-                          onClick={(ev) => {
-                            ev.stopPropagation();
-                            openCatDialog(c);
-                          }}
-                        >
-                          <CameraAltIcon fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
-                    </Box>
-                  ) : null}
                 </Paper>
               </Grid>
             ))}
@@ -510,10 +310,9 @@ export default function HomePage() {
                   </Grid>
                 ) : (
                   currentPageProducts.map((p) => (
-                    console.log("Chi tiết sản phẩm:", p),
                     <Grid item xs={12} sm={6} md={4} key={p.id}>
                       <Card sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
-                        <CardMedia component="img" height="280" image={p.image_url || "/images/pnv1.jpg"} alt={p.name} sx={{ objectFit: "cover" }} />
+                        <CardMedia component="img" height="280" image={p.image_url || "/images/quanxanh2.jpg"} alt={p.name} sx={{ objectFit: "cover" }} />
                         <CardContent sx={{ flexGrow: 1 }}>
                           <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
                             {p.name}

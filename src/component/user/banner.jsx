@@ -4,7 +4,7 @@ import { Box, Container, Grid, Typography, Button, Stack } from "@mui/material";
 const HERO_KEY = "home_hero_poster";
 
 export default function HomeBanner() {
-  let heroImageUrl = "/images/hero-banner.jpg";
+  let heroImageUrl = "/images/quanxanh3.jpg";
   try {
     const dataUrl = localStorage.getItem(HERO_KEY);
     if (dataUrl) heroImageUrl = dataUrl;
