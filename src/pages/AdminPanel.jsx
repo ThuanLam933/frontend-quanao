@@ -258,6 +258,21 @@ function CategoriesPage({ setSnack }) {
   const PAGE_SIZE = 12;
   const [totalPages, setTotalPages] = useState(1);
 
+  // --- helper slugify (remove diacritics, lower, replace spaces -> -) ---
+  const slugify = (text) => {
+    if (!text) return "";
+    return text
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toString()
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9\s-]/g, "")
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-+|-+$/g, "");
+  };
+
   const fetchCategories = useCallback(async () => {
     setLoading(true);
     try {
@@ -283,7 +298,6 @@ function CategoriesPage({ setSnack }) {
     const token = localStorage.getItem("access_token");
     try {
       const method = obj.id ? "PUT" : "POST";
-      // common endpoints: POST /api/categories, PUT /api/categories/{id}
       const url = obj.id ? `${API_BASE}/api/categories/${obj.id}` : `${API_BASE}/api/categories`;
       const res = await fetch(url, {
         method,
@@ -291,7 +305,7 @@ function CategoriesPage({ setSnack }) {
         body: JSON.stringify(obj),
       });
       if (!res.ok) {
-        const txt = await res.text().catch(()=>"");
+        const txt = await res.text().catch(()=>(""));
         throw new Error(txt || "Save failed");
       }
       setSnack({ severity: "success", message: "Lưu danh mục thành công" });
@@ -362,21 +376,42 @@ function CategoriesPage({ setSnack }) {
         )}
       </Paper>
 
-      <CategoryEditDialog open={editOpen} onClose={()=>setEditOpen(false)} item={editing} onSave={handleSave}/>
+      <CategoryEditDialog open={editOpen} onClose={()=>setEditOpen(false)} item={editing} onSave={handleSave} slugify={slugify}/>
     </Box>
   );
 }
 
-function CategoryEditDialog({ open, onClose, item, onSave }) {
+// CategoryEditDialog is defined here (inside same file) but used by the function above.
+// It accepts slugify prop so it's reusable.
+function CategoryEditDialog({ open, onClose, item, onSave, slugify }) {
   const [form, setForm] = useState(item ?? null);
-  useEffect(()=> setForm(item ?? null), [item]);
+  const [manualSlug, setManualSlug] = useState(false);
+
+  useEffect(()=> {
+    setForm(item ?? null);
+    setManualSlug(!!(item && item.slug));
+  }, [item]);
+
+  const onNameChange = (value) => {
+    const next = { ...(form || {}), name: value };
+    if (!manualSlug) {
+      next.slug = slugify(value);
+    }
+    setForm(next);
+  };
+
+  const onSlugChange = (value) => {
+    setManualSlug(true);
+    setForm({ ...(form || {}), slug: value });
+  };
+
   if (!form) return null;
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>{form.id ? "Edit category" : "Create category"}</DialogTitle>
       <DialogContent>
-        <TextField label="Name" fullWidth value={form.name || ""} onChange={(e)=> setForm({...form, name: e.target.value})} sx={{ mt:1 }} />
-        <TextField label="Slug" fullWidth value={form.slug ?? ""} onChange={(e)=> setForm({...form, slug: e.target.value})} sx={{ mt:1 }} />
+        <TextField label="Name" fullWidth value={form.name || ""} onChange={(e)=> onNameChange(e.target.value)} sx={{ mt:1 }} />
+        <TextField label="Slug" fullWidth value={form.slug ?? ""} onChange={(e)=> onSlugChange(e.target.value)} sx={{ mt:1 }} helperText="Nếu muốn slug khác mặc định, chỉnh tay vào đây." />
         <TextField label="Description" fullWidth multiline minRows={3} value={form.description ?? ""} onChange={(e)=> setForm({...form, description: e.target.value})} sx={{ mt:1 }} />
       </DialogContent>
       <DialogActions>
@@ -386,6 +421,7 @@ function CategoryEditDialog({ open, onClose, item, onSave }) {
     </Dialog>
   );
 }
+
 
 /* ---------------------- Colors ---------------------- */
 /* ---------------------- Colors (replaces CategoriesPage) ---------------------- */
@@ -398,13 +434,36 @@ function ColorsPage({ setSnack }) {
   const PAGE_SIZE = 12;
   const [totalPages, setTotalPages] = useState(1);
 
+  // --- helper slugify (remove diacritics, lower, replace spaces -> -) ---
+  const slugify = (text) => {
+    if (!text) return "";
+    return text
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toString()
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9\s-]/g, "")
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-+|-+$/g, "");
+  };
+
   const fetchColors = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/colors`);
       if (!res.ok) throw new Error("Colors fetch failed");
       const data = await res.json();
-      const arr = Array.isArray(data) ? data : (data.data ?? data.items ?? []);
+
+      // hỗ trợ array hoặc response có data/items
+      const rawArr = Array.isArray(data) ? data : (data.data ?? data.items ?? []);
+      const arr = (rawArr || []).map((it) => {
+        const name = it.name ?? it.title ?? "";
+        const slug = it.slug ?? (name ? slugify(name) : "");
+        return { ...it, name, slug };
+      });
+
       setItems(arr);
       setTotalPages(Math.max(1, Math.ceil(arr.length / PAGE_SIZE)));
     } catch (err) {
@@ -417,17 +476,21 @@ function ColorsPage({ setSnack }) {
   useEffect(()=> { fetchColors(); }, [fetchColors]);
 
   const onEdit = (item) => { setEditing(item); setEditOpen(true); };
-  const onCreate = () => { setEditing({ name: "", slug: "", hex: "" }); setEditOpen(true); };
+  const onCreate = () => { setEditing({ name: "", slug: "" }); setEditOpen(true); };
 
   const handleSave = async (obj) => {
     const token = localStorage.getItem("access_token");
     try {
       const method = obj.id ? "PUT" : "POST";
       const url = obj.id ? `${API_BASE}/api/colors/${obj.id}` : `${API_BASE}/api/colors`;
+      const payload = {
+        name: obj.name,
+        slug: obj.slug && String(obj.slug).trim() ? obj.slug : slugify(obj.name),
+      };
       const res = await fetch(url, {
         method,
         headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        body: JSON.stringify(obj),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) {
         const txt = await res.text().catch(()=>"");
@@ -474,8 +537,6 @@ function ColorsPage({ setSnack }) {
                   <TableCell>#</TableCell>
                   <TableCell>Name</TableCell>
                   <TableCell>Slug</TableCell>
-                  <TableCell>Hex</TableCell>
-                  <TableCell>Preview</TableCell>
                   <TableCell>Actions</TableCell>
                 </TableRow>
               </TableHead>
@@ -485,16 +546,6 @@ function ColorsPage({ setSnack }) {
                     <TableCell>{c.id}</TableCell>
                     <TableCell>{c.name}</TableCell>
                     <TableCell>{c.slug ?? "-"}</TableCell>
-                    <TableCell>{c.hex ?? "-"}</TableCell>
-                    <TableCell>
-                      <Box sx={{
-                        width: 28,
-                        height: 20,
-                        borderRadius: 1,
-                        border: "1px solid rgba(0,0,0,0.08)",
-                        backgroundColor: c.hex || "transparent"
-                      }} />
-                    </TableCell>
                     <TableCell>
                       <Button size="small" startIcon={<VisibilityIcon/>} onClick={()=> window.open(`/collections?color=${c.slug || c.name}`,"_blank")}>View</Button>
                       <Button size="small" startIcon={<EditIcon/>} onClick={()=> onEdit(c)}>Edit</Button>
@@ -511,24 +562,36 @@ function ColorsPage({ setSnack }) {
         )}
       </Paper>
 
-      <ColorEditDialog open={editOpen} onClose={()=>setEditOpen(false)} item={editing} onSave={handleSave}/>
+      <ColorEditDialog open={editOpen} onClose={()=>setEditOpen(false)} item={editing} onSave={handleSave} slugify={slugify}/>
     </Box>
   );
 }
 
-function ColorEditDialog({ open, onClose, item, onSave }) {
+// ColorEditDialog (without hex & preview)
+function ColorEditDialog({ open, onClose, item, onSave, slugify }) {
   const [form, setForm] = useState(item ?? null);
-  useEffect(()=> setForm(item ?? null), [item]);
-  if (!form) return null;
+  const [manualSlug, setManualSlug] = useState(false);
 
-  // Ensure hex is normalized to start with '#'
-  const normalizeHex = (v) => {
-    if (!v) return "";
-    const s = String(v).trim();
-    if (s === "") return "";
-    return s.startsWith("#") ? s : `#${s}`;
+  useEffect(()=> {
+    setForm(item ?? null);
+    // nếu edit một item có slug sẵn thì coi đó là manual (không tự override)
+    setManualSlug(!!(item && item.slug));
+  }, [item]);
+
+  const onNameChange = (value) => {
+    const next = { ...(form || {}), name: value };
+    if (!manualSlug) {
+      next.slug = slugify(value);
+    }
+    setForm(next);
   };
 
+  const onSlugChange = (value) => {
+    setManualSlug(true);
+    setForm({ ...(form || {}), slug: value });
+  };
+
+  if (!form) return null;
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>{form.id ? "Edit color" : "Create color"}</DialogTitle>
@@ -537,48 +600,27 @@ function ColorEditDialog({ open, onClose, item, onSave }) {
           label="Name"
           fullWidth
           value={form.name || ""}
-          onChange={(e)=> setForm({...form, name: e.target.value})}
+          onChange={(e)=> onNameChange(e.target.value)}
           sx={{ mt:1 }}
         />
         <TextField
           label="Slug"
           fullWidth
           value={form.slug ?? ""}
-          onChange={(e)=> setForm({...form, slug: e.target.value})}
+          onChange={(e)=> onSlugChange(e.target.value)}
           sx={{ mt:1 }}
+          helperText="Nếu muốn slug khác mặc định, chỉnh tay vào đây."
         />
-        <TextField
-          label="Hex (e.g. #FF0000)"
-          fullWidth
-          value={form.hex ?? ""}
-          onChange={(e)=> setForm({...form, hex: normalizeHex(e.target.value)})}
-          sx={{ mt:1 }}
-        />
-
-        <Box sx={{ mt:2, display:"flex", alignItems:"center", gap:2 }}>
-          <Typography variant="body2">Preview:</Typography>
-          <Box sx={{
-            width: 48,
-            height: 32,
-            borderRadius: 1,
-            border: "1px solid rgba(0,0,0,0.08)",
-            backgroundColor: form.hex || "transparent"
-          }} />
-          <Typography variant="caption" sx={{ color: "text.secondary" }}>{form.hex || "—"}</Typography>
-        </Box>
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" onClick={()=> {
-          // normalize hex before save
-          const payload = { ...form };
-          if (payload.hex) payload.hex = normalizeHex(payload.hex);
-          onSave(payload);
-        }}>Save</Button>
+        <Button variant="contained" onClick={()=> onSave(form)}>Save</Button>
       </DialogActions>
     </Dialog>
   );
 }
+
+
 
 /* ---------------------- Sizes ---------------------- */
 function SizesPage({ setSnack }) {
@@ -590,13 +632,36 @@ function SizesPage({ setSnack }) {
   const PAGE_SIZE = 12;
   const [totalPages, setTotalPages] = useState(1);
 
+  // helper slugify
+  const slugify = (text) => {
+    if (!text) return "";
+    return text
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toString()
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9\s-]/g, "")
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-+|-+$/g, "");
+  };
+
   const fetchSizes = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/sizes`);
       if (!res.ok) throw new Error("Sizes fetch failed");
       const data = await res.json();
-      const arr = Array.isArray(data) ? data : (data.data ?? data.items ?? []);
+
+      // support array or paginated response
+      const rawArr = Array.isArray(data) ? data : (data.data ?? data.items ?? []);
+      const arr = (rawArr || []).map((it) => {
+        const name = it.name ?? it.title ?? "";
+        const slug = it.slug ?? (name ? slugify(name) : "");
+        return { ...it, name, slug };
+      });
+
       setItems(arr);
       setTotalPages(Math.max(1, Math.ceil(arr.length / PAGE_SIZE)));
     } catch (err) {
@@ -616,10 +681,11 @@ function SizesPage({ setSnack }) {
     try {
       const method = obj.id ? "PUT" : "POST";
       const url = obj.id ? `${API_BASE}/api/sizes/${obj.id}` : `${API_BASE}/api/sizes`;
+      const payload = { name: obj.name, slug: obj.slug }; // only send name+slug
       const res = await fetch(url, {
         method,
         headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        body: JSON.stringify(obj),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) {
         const txt = await res.text().catch(()=>"");
@@ -691,22 +757,40 @@ function SizesPage({ setSnack }) {
         )}
       </Paper>
 
-      <SizeEditDialog open={editOpen} onClose={()=>setEditOpen(false)} item={editing} onSave={handleSave}/>
+      <SizeEditDialog open={editOpen} onClose={()=>setEditOpen(false)} item={editing} onSave={handleSave} slugify={slugify}/>
     </Box>
   );
 }
 
-function SizeEditDialog({ open, onClose, item, onSave }) {
+function SizeEditDialog({ open, onClose, item, onSave, slugify }) {
   const [form, setForm] = useState(item ?? null);
-  useEffect(()=> setForm(item ?? null), [item]);
-  if (!form) return null;
+  const [manualSlug, setManualSlug] = useState(false);
 
+  useEffect(()=> {
+    setForm(item ?? null);
+    setManualSlug(!!(item && item.slug));
+  }, [item]);
+
+  const onNameChange = (value) => {
+    const next = { ...(form || {}), name: value };
+    if (!manualSlug) {
+      next.slug = slugify(value);
+    }
+    setForm(next);
+  };
+
+  const onSlugChange = (value) => {
+    setManualSlug(true);
+    setForm({ ...(form || {}), slug: value });
+  };
+
+  if (!form) return null;
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>{form.id ? "Edit size" : "Create size"}</DialogTitle>
       <DialogContent>
-        <TextField label="Name" fullWidth value={form.name || ""} onChange={(e)=> setForm({...form, name: e.target.value})} sx={{ mt:1 }} />
-        <TextField label="Slug" fullWidth value={form.slug ?? ""} onChange={(e)=> setForm({...form, slug: e.target.value})} sx={{ mt:1 }} />
+        <TextField label="Name" fullWidth value={form.name || ""} onChange={(e)=> onNameChange(e.target.value)} sx={{ mt:1 }} />
+        <TextField label="Slug" fullWidth value={form.slug ?? ""} onChange={(e)=> onSlugChange(e.target.value)} sx={{ mt:1 }} helperText="Nếu muốn slug khác mặc định, chỉnh tay vào đây." />
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose}>Cancel</Button>
@@ -715,6 +799,7 @@ function SizeEditDialog({ open, onClose, item, onSave }) {
     </Dialog>
   );
 }
+
 
 
 /* ---------------------- Products ---------------------- */
