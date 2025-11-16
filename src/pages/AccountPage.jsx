@@ -20,14 +20,11 @@ import {
   Chip,
   Snackbar,
   Alert,
-  IconButton,
 } from "@mui/material";
 import { createTheme, ThemeProvider } from "@mui/material/styles";
 import EditIcon from "@mui/icons-material/Edit";
-import LogoutIcon from "@mui/icons-material/Logout";
 import ShoppingBagIcon from "@mui/icons-material/ShoppingBag";
 import HomeIcon from "@mui/icons-material/Home";
-import FavoriteIcon from "@mui/icons-material/Favorite";
 import { useNavigate } from "react-router-dom";
 
 const API_BASE = process.env.REACT_APP_API_BASE || "http://127.0.0.1:8000";
@@ -74,55 +71,94 @@ export default function AccountPage() {
   const [loadingWishlist, setLoadingWishlist] = useState(false);
   const [addresses, setAddresses] = useState([]);
 
+  // chỉ giữ chữ số và giới hạn tối đa 10 ký tự
+  const sanitizePhone = (value) => {
+    if (!value) return "";
+    const digits = value.replace(/\D/g, "");
+    return digits.slice(0, 10);
+  };
+
   // initialize form when user loads or changes
   useEffect(() => {
-    if (user) setForm({ name: user.name ?? "", email: user.email ?? "", phone: user.phone ?? "" ,password: user.password ?? ""});
+    if (user)
+      setForm({
+        name: user.name ?? "",
+        email: user.email ?? "",
+        phone: sanitizePhone(user.phone ?? ""),
+        password: user.password ?? "",
+      });
   }, [user]);
 
-  // fetch orders (example endpoint)
-  const fetchOrders = useCallback(async () => {
+  // ---------- fetchOrders: function declaration (hoisted) to avoid TDZ ----------
+  // fetch orders (use Authorization token; handle errors without auto-logout)
+  async function fetchOrders() {
     setLoadingOrders(true);
     try {
-      // if you have API: call `${API_BASE}/api/carts?user_id=${user.id}` or /api/orders
-      const res = await fetch(`${API_BASE}/api/carts${user && user.id ? `?user_id=${encodeURIComponent(user.id)}` : ""}`);
-      if (!res.ok) throw new Error("fetch orders failed");
-      const data = await res.json();
-      setOrders(Array.isArray(data) ? data : data.data ?? []);
+      const token = localStorage.getItem("access_token");
+      if (!token) {
+        // no token -> don't call API, show nothing
+        setOrders([]);
+        setLoadingOrders(false);
+        return;
+      }
+
+      const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+      const url = `${API_BASE}/api/orders`;
+      let res = await fetch(url, { headers });
+
+      // read body/text for robust parsing
+      const text = await res.text().catch(() => "");
+      const ct = res.headers.get("content-type") || "";
+
+      // parse JSON if possible
+      let parsed = null;
+      if (ct.includes("application/json") || text.trim().startsWith("{") || text.trim().startsWith("[")) {
+        try {
+          parsed = text ? JSON.parse(text) : null;
+        } catch (e) {
+          parsed = null;
+        }
+      }
+
+      if (!res.ok) {
+        // If 401/403: warn user but do not force logout to avoid unexpected behavior
+        if (res.status === 401 || res.status === 403) {
+          console.warn("fetchOrders auth warning:", res.status, parsed || text);
+          setSnack({ severity: "warning", message: "Không thể tải đơn hàng: cần đăng nhập hoặc quyền không đủ." });
+          setOrders([]);
+          return;
+        }
+        // other errors: show server message if available
+        const msg = (parsed && (parsed.message || parsed.error)) || `Lỗi khi tải đơn hàng (${res.status})`;
+        setSnack({ severity: "error", message: msg });
+        setOrders([]);
+        return;
+      }
+
+      // OK: use parsed JSON or wrapper
+      const list = Array.isArray(parsed) ? parsed : parsed?.data ?? parsed?.orders ?? [];
+      setOrders(Array.isArray(list) ? list : []);
+      try {
+        localStorage.setItem("orders_cache", JSON.stringify(Array.isArray(list) ? list : []));
+      } catch {}
+
+      // success done
+      return;
     } catch (err) {
-      console.warn("load orders:", err);
-      // fallback: empty
-      setOrders([]);
+      console.error("fetchOrders network error:", err);
+      setSnack({ severity: "error", message: "Lỗi mạng khi tải đơn hàng." });
+      // fallback -> cached orders
+      try {
+        const raw = localStorage.getItem("orders_cache") || "[]";
+        const cached = JSON.parse(raw);
+        setOrders(Array.isArray(cached) ? cached : []);
+      } catch {
+        setOrders([]);
+      }
     } finally {
       setLoadingOrders(false);
     }
-  }, [user]);
-
-  // fetch wishlist (fallback to localStorage if no API)
-  // const fetchWishlist = useCallback(async () => {
-  //   setLoadingWishlist(true);
-  //   try {
-  //     // try API first:
-  //     const res = await fetch(`${API_BASE}/api/wishlist${user && user.id ? `?user_id=${encodeURIComponent(user.id)}` : ""}`);
-  //     if (res.ok) {
-  //       const data = await res.json();
-  //       setWishlist(Array.isArray(data) ? data : data.data ?? []);
-  //     } else {
-  //       // fallback to localStorage
-  //       const raw = localStorage.getItem("wishlist") || "[]";
-  //       setWishlist(JSON.parse(raw));
-  //     }
-  //   } catch (err) {
-  //     console.warn("load wishlist:", err);
-  //     try {
-  //       const raw = localStorage.getItem("wishlist") || "[]";
-  //       setWishlist(JSON.parse(raw));
-  //     } catch {
-  //       setWishlist([]);
-  //     }
-  //   } finally {
-  //     setLoadingWishlist(false);
-  //   }
-  // }, [user]);
+  }
 
   // fetch addresses (if you store locally or via API)
   const fetchAddresses = useCallback(() => {
@@ -135,169 +171,183 @@ export default function AccountPage() {
     }
   }, []);
 
+  // Call fetchOrders only when user exists AND token exists
   useEffect(() => {
-    if (user) {
+    const token = localStorage.getItem("access_token");
+    if (user && token) {
       fetchOrders();
       // fetchWishlist();
       fetchAddresses();
-    } else {
-      // if not logged in, redirect to login
-      // optional: comment out if you allow anonymous
-      // navigate('/login');
+    } else if (user && !token) {
+      // user object exists but token missing -> show mild warning
+      setSnack({ severity: "warning", message: "Bạn chưa đăng nhập hoặc token không hợp lệ." });
     }
-  }, [user, fetchOrders, fetchAddresses, navigate]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, fetchAddresses]);
 
   const handleTabChange = (e, v) => setTab(v);
 
   const handleSaveProfile = async () => {
-  setSaving(true);
+    setSaving(true);
 
-  try {
-    // === basic validation ===
-    if (form.email && !/^\S+@\S+\.\S+$/.test(form.email)) {
-      setSnack({ severity: "error", message: "Email không hợp lệ." });
-      setSaving(false);
-      return;
-    }
-
-    // keep original for rollback
-    const originalUser = user ? { ...user } : null;
-    const optimisticUser = { ...(user || {}), ...form };
-
-    // === OPTIMISTIC: update UI & localStorage right away ===
-    setUser(optimisticUser);
     try {
-      localStorage.setItem("user", JSON.stringify(optimisticUser));
-    } catch (e) {
-      console.warn("localStorage set failed (optimistic):", e);
-    }
-
-    // notify other listeners/tabs
-    try {
-      window.dispatchEvent(new Event("userUpdated"));
-      if (typeof BroadcastChannel !== "undefined") {
-        const bc = new BroadcastChannel("app-user");
-        bc.postMessage({ type: "userUpdated", user: optimisticUser });
-        bc.close();
+      // === basic validation ===
+      if (form.email && !/^\S+@\S+\.\S+$/.test(form.email)) {
+        setSnack({ severity: "error", message: "Email không hợp lệ." });
+        setSaving(false);
+        return;
       }
-    } catch (e) {
-      /* ignore broadcast errors */
-    }
-
-    // === if offline: keep optimistic and inform user ===
-    if (!navigator.onLine) {
-      // Optionally queue for later sync: push to 'pendingUserUpdates' array in localStorage
-      try {
-        const pendingKey = "pending_user_updates";
-        const raw = localStorage.getItem(pendingKey) || "[]";
-        const arr = JSON.parse(raw);
-        arr.push({ at: Date.now(), payload: form, userId: user?.id ?? null });
-        localStorage.setItem(pendingKey, JSON.stringify(arr));
-      } catch (e) {
-        console.warn("queue pending update failed:", e);
-      }
-
-      setSnack({ severity: "info", message: "Bạn đang offline — thay đổi đã lưu cục bộ và sẽ đồng bộ khi có mạng." });
-      setSaving(false);
-      return;
-    }
-
-    // === Prepare API call ===
-    const token = localStorage.getItem("access_token");
-    const headers = { "Content-Type": "application/json" };
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-
-    // prefer /api/me endpoint (ensure you have it server-side)
-    const url = `${API_BASE}/api/me`;
-
-    const res = await fetch(url, {
-      method: "PUT",
-      headers,
-      body: JSON.stringify(form),
-    }).catch((err) => {
-      console.error("Network error on profile update:", err);
-      return null;
-    });
-
-    // if network error (res === null)
-    if (!res) {
-      // keep optimistic local change, inform user
-      setSnack({ severity: "info", message: "Lỗi mạng — đã lưu cục bộ, sẽ thử đồng bộ sau." });
-      setSaving(false);
-      return;
-    }
-
-    const text = await res.text().catch(() => "");
-    let body = null;
-    try { body = text ? JSON.parse(text) : null; } catch (e) { body = null; }
-
-    if (!res.ok) {
-      // Special-case 404: endpoint not found -> keep local but notify
-      if (res.status === 404) {
-        console.warn("Profile update endpoint not found (404). Keeping local changes.");
-        setSnack({ severity: "warning", message: "Đã lưu cục bộ nhưng server không hỗ trợ cập nhật (404)." });
+      // sau kiểm tra email
+      if (form.phone && !/^\d{10}$/.test(form.phone)) {
+        setSnack({ severity: "error", message: "Số điện thoại phải đúng 10 chữ số (chỉ gồm số)." });
         setSaving(false);
         return;
       }
 
-      // For other errors -> rollback optimistic changes
-      const serverMsg = (body && (body.message || body.error)) || `Cập nhật thất bại (${res.status})`;
-      // rollback localStorage & state
+      // keep original for rollback
+      const originalUser = user ? { ...user } : null;
+      const optimisticUser = { ...(user || {}), ...form };
+
+      // === OPTIMISTIC: update UI & localStorage right away ===
+      setUser(optimisticUser);
       try {
-        if (originalUser) localStorage.setItem("user", JSON.stringify(originalUser));
-        else localStorage.removeItem("user");
-      } catch (e) { console.warn("rollback localStorage failed:", e); }
-      setUser(originalUser);
-      setSnack({ severity: "error", message: serverMsg });
+        localStorage.setItem("user", JSON.stringify(optimisticUser));
+      } catch (e) {
+        console.warn("localStorage set failed (optimistic):", e);
+      }
+
+      // notify other listeners/tabs
+      try {
+        window.dispatchEvent(new Event("userUpdated"));
+        if (typeof BroadcastChannel !== "undefined") {
+          const bc = new BroadcastChannel("app-user");
+          bc.postMessage({ type: "userUpdated", user: optimisticUser });
+          bc.close();
+        }
+      } catch (e) {
+        /* ignore broadcast errors */
+      }
+
+      // === if offline: keep optimistic and inform user ===
+      if (!navigator.onLine) {
+        // Optionally queue for later sync: push to 'pendingUserUpdates' array in localStorage
+        try {
+          const pendingKey = "pending_user_updates";
+          const raw = localStorage.getItem(pendingKey) || "[]";
+          const arr = JSON.parse(raw);
+          arr.push({ at: Date.now(), payload: form, userId: user?.id ?? null });
+          localStorage.setItem(pendingKey, JSON.stringify(arr));
+        } catch (e) {
+          console.warn("queue pending update failed:", e);
+        }
+
+        setSnack({ severity: "info", message: "Bạn đang offline — thay đổi đã lưu cục bộ và sẽ đồng bộ khi có mạng." });
+        setSaving(false);
+        return;
+      }
+
+      // === Prepare API call ===
+      const token = localStorage.getItem("access_token");
+      const headers = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+
+      // prefer /api/me endpoint (ensure you have it server-side)
+      const url = `${API_BASE}/api/me`;
+
+      const res = await fetch(url, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify(form),
+      }).catch((err) => {
+        console.error("Network error on profile update:", err);
+        return null;
+      });
+
+      // if network error (res === null)
+      if (!res) {
+        // keep optimistic local change, inform user
+        setSnack({ severity: "info", message: "Lỗi mạng — đã lưu cục bộ, sẽ thử đồng bộ sau." });
+        setSaving(false);
+        return;
+      }
+
+      const text = await res.text().catch(() => "");
+      let body = null;
+      try {
+        body = text ? JSON.parse(text) : null;
+      } catch (e) {
+        body = null;
+      }
+
+      if (!res.ok) {
+        // Special-case 404: endpoint not found -> keep local but notify
+        if (res.status === 404) {
+          console.warn("Profile update endpoint not found (404). Keeping local changes.");
+          setSnack({ severity: "warning", message: "Đã lưu cục bộ nhưng server không hỗ trợ cập nhật (404)." });
+          setSaving(false);
+          return;
+        }
+
+        // For other errors -> rollback optimistic changes
+        const serverMsg = (body && (body.message || body.error)) || `Cập nhật thất bại (${res.status})`;
+        // rollback localStorage & state
+        try {
+          if (originalUser) localStorage.setItem("user", JSON.stringify(originalUser));
+          else localStorage.removeItem("user");
+        } catch (e) {
+          console.warn("rollback localStorage failed:", e);
+        }
+        setUser(originalUser);
+        setSnack({ severity: "error", message: serverMsg });
+        setSaving(false);
+        return;
+      }
+
+      // === Success ===
+      // Prefer server-returned user object (body may include user)
+      const updatedFromServer =
+        body && typeof body === "object" && (body.id || body.email || body.name) ? body : optimisticUser;
+
+      try {
+        localStorage.setItem("user", JSON.stringify(updatedFromServer));
+      } catch (e) {
+        console.warn("localStorage set failed (final):", e);
+      }
+
+      setUser(updatedFromServer);
+
+      // broadcast final user
+      try {
+        window.dispatchEvent(new Event("userUpdated"));
+        if (typeof BroadcastChannel !== "undefined") {
+          const bc = new BroadcastChannel("app-user");
+          bc.postMessage({ type: "userUpdated", user: updatedFromServer });
+          bc.close();
+        }
+      } catch (e) {
+        /* ignore */
+      }
+
+      setSnack({ severity: "success", message: "Cập nhật thông tin thành công." });
+    } catch (err) {
+      console.error("save profile err:", err);
+      // rollback to original if possible
+      try {
+        if (user) {
+          localStorage.setItem("user", JSON.stringify(user));
+          setUser(user);
+        } else {
+          localStorage.removeItem("user");
+          setUser(null);
+        }
+      } catch (e) {
+        console.warn("rollback failed:", e);
+      }
+      setSnack({ severity: "error", message: err?.message ?? "Cập nhật thất bại." });
+    } finally {
       setSaving(false);
-      return;
     }
-
-    // === Success ===
-    // Prefer server-returned user object (body may include user)
-    const updatedFromServer = (body && typeof body === "object" && (body.id || body.email || body.name))
-      ? body
-      : optimisticUser;
-
-    try {
-      localStorage.setItem("user", JSON.stringify(updatedFromServer));
-    } catch (e) {
-      console.warn("localStorage set failed (final):", e);
-    }
-
-    setUser(updatedFromServer);
-
-    // broadcast final user
-    try {
-      window.dispatchEvent(new Event("userUpdated"));
-      if (typeof BroadcastChannel !== "undefined") {
-        const bc = new BroadcastChannel("app-user");
-        bc.postMessage({ type: "userUpdated", user: updatedFromServer });
-        bc.close();
-      }
-    } catch (e) { /* ignore */ }
-
-    setSnack({ severity: "success", message: "Cập nhật thông tin thành công." });
-  } catch (err) {
-    console.error("save profile err:", err);
-    // rollback to original if possible
-    try {
-      if (user) {
-        localStorage.setItem("user", JSON.stringify(user));
-        setUser(user);
-      } else {
-        localStorage.removeItem("user");
-        setUser(null);
-      }
-    } catch (e) {
-      console.warn("rollback failed:", e);
-    }
-    setSnack({ severity: "error", message: err?.message ?? "Cập nhật thất bại." });
-  } finally {
-    setSaving(false);
-  }
-};
-
+  };
 
   const handleLogout = () => {
     try {
@@ -312,15 +362,6 @@ export default function AccountPage() {
       setSnack({ severity: "error", message: "Không thể đăng xuất." });
     }
   };
-
-  // const handleRemoveWishlist = (id) => {
-  //   const updated = (wishlist || []).filter((it) => it.id !== id && it.product_id !== id);
-  //   setWishlist(updated);
-  //   try {
-  //     localStorage.setItem("wishlist", JSON.stringify(updated));
-  //   } catch {}
-  //   setSnack({ severity: "info", message: "Đã xóa khỏi wishlist." });
-  // };
 
   const handleGoToProduct = (id) => navigate(`/product/${id}`);
 
@@ -362,9 +403,6 @@ export default function AccountPage() {
                   <Button startIcon={<ShoppingBagIcon />} variant="outlined" onClick={() => setTab(1)}>
                     Đơn hàng
                   </Button>
-                  {/* <Button startIcon={<FavoriteIcon />} variant="outlined" onClick={() => setTab(3)}>
-                    Wishlist
-                  </Button> */}
                   <Button startIcon={<HomeIcon />} color="error" variant="outlined" onClick={handleLogout}>
                     Đăng xuất
                   </Button>
@@ -379,7 +417,6 @@ export default function AccountPage() {
                   <Tab label="Thông tin" {...a11yProps(0)} />
                   <Tab label="Đơn hàng" {...a11yProps(1)} />
                   <Tab label="Địa chỉ" {...a11yProps(2)} />
-                  {/* <Tab label="Wishlist" {...a11yProps(3)} /> */}
                 </Tabs>
 
                 {/* Tab 0: Profile */}
@@ -396,7 +433,13 @@ export default function AccountPage() {
                         <TextField label="Email" fullWidth value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
                       </Grid>
                       <Grid item xs={12} sm={6}>
-                        <TextField label="Số điện thoại" fullWidth value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
+                        <TextField
+                          label="Số điện thoại"
+                          fullWidth
+                          value={form.phone}
+                          onChange={(e) => setForm({ ...form, phone: sanitizePhone(e.target.value) })}
+                          inputProps={{ maxLength: 10 }}
+                        />
                       </Grid>
                       <Grid item xs={12} sm={6}>
                         <TextField label="Password" fullWidth value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
@@ -407,7 +450,13 @@ export default function AccountPage() {
                       <Button variant="contained" onClick={handleSaveProfile} disabled={saving}>
                         {saving ? <CircularProgress size={20} /> : "Lưu"}
                       </Button>
-                      <Button variant="outlined" onClick={() => { setForm({ name: user?.name ?? "", email: user?.email ?? "", phone: user?.phone ?? "" ,password: user?.password ?? ""}); setSnack({ severity: "info", message: "Đã phục hồi" }); }}>
+                      <Button
+                        variant="outlined"
+                        onClick={() => {
+                          setForm({ name: user?.name ?? "", email: user?.email ?? "", phone: user?.phone ?? "", password: user?.password ?? "" });
+                          setSnack({ severity: "info", message: "Đã phục hồi" });
+                        }}
+                      >
                         Hủy
                       </Button>
                     </Box>
@@ -440,7 +489,9 @@ export default function AccountPage() {
                                   </Box>
                                 }
                               />
-                              <Button size="small" onClick={() => navigate(`/order/${o.id}`)}>Chi tiết</Button>
+                              <Button size="small" onClick={() => navigate(`/order/${o.id}`)}>
+                                Chi tiết
+                              </Button>
                             </ListItem>
                             <Divider />
                           </React.Fragment>
@@ -464,7 +515,9 @@ export default function AccountPage() {
                           <Grid item xs={12} key={idx}>
                             <Paper sx={{ p: 2 }}>
                               <Typography sx={{ fontWeight: 700 }}>{a.name ?? `Địa chỉ ${idx + 1}`}</Typography>
-                              <Typography variant="body2" color="text.secondary">{a.address}</Typography>
+                              <Typography variant="body2" color="text.secondary">
+                                {a.address}
+                              </Typography>
                               <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
                                 <Chip label={a.phone} />
                                 <Chip label={a.city} />
@@ -476,40 +529,6 @@ export default function AccountPage() {
                     )}
                   </Box>
                 )}
-
-                {/* Tab 3: Wishlist */}
-                {/* {tab === 3 && (
-                  <Box>
-                    <Typography variant="h6" sx={{ mb: 2 }}>
-                      Sản phẩm yêu thích
-                    </Typography>
-                    {loadingWishlist ? (
-                      <Box sx={{ display: "flex", justifyContent: "center", py: 4 }}>
-                        <CircularProgress />
-                      </Box>
-                    ) : wishlist.length === 0 ? (
-                      <Typography>Chưa có sản phẩm yêu thích.</Typography>
-                    ) : (
-                      <Grid container spacing={2}>
-                        {wishlist.map((w) => (
-                          <Grid item xs={12} sm={6} md={4} key={w.id ?? w.product_id}>
-                            <Paper sx={{ p: 1, display: "flex", gap: 2 }}>
-                              <Box component="img" src={w.image_url ?? w.thumbnail ?? "/images/pnv1.jpg"} alt={w.name ?? "product"} sx={{ width: 90, height: 90, objectFit: "cover", borderRadius: 1 }} />
-                              <Box sx={{ flex: 1 }}>
-                                <Typography sx={{ fontWeight: 700 }}>{w.name ?? w.title ?? "Sản phẩm"}</Typography>
-                                <Typography variant="body2" color="text.secondary">{w.price ? Number(w.price).toLocaleString("vi-VN") + "₫" : "Liên hệ"}</Typography>
-                                <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
-                                  <Button size="small" onClick={() => handleGoToProduct(w.product_id ?? w.id)}>Xem</Button>
-                                  <Button size="small" color="error" onClick={() => handleRemoveWishlist(w.id ?? w.product_id)}>Xóa</Button>
-                                </Stack>
-                              </Box>
-                            </Paper>
-                          </Grid>
-                        ))}
-                      </Grid>
-                    )}
-                  </Box>
-                )} */}
               </Paper>
             </Grid>
           </Grid>

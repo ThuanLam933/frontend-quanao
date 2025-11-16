@@ -151,10 +151,10 @@ export default function HomePage() {
     }
     // fallback static tiles (ensure these images exist in public/images)
     return [
-      { id: "c1", title: "CLOTHERS", img: "/images/pnv.jpg", to: "/collections?category=clother" },
-      { id: "c2", title: "T-SHIRT", img: "/images/pnv1.jpg", to: "/collections?category=tshirt" },
-      { id: "c3", title: "JEANS", img: "/images/pnv.jpg", to: "/collections?category=jeans" },
-      { id: "c4", title: "SHORTS", img: "/images/pnv1.jpg", to: "/collections?category=shorts" },
+      { id: "c1", title: "CLOTHERS", img: "/images/quanxanh3.jpg", to: "/collections?category=clother" },
+      { id: "c2", title: "T-SHIRT", img: "/images/quanxanh2.jpg", to: "/collections?category=tshirt" },
+      { id: "c3", title: "JEANS", img: "/images/quanxanh2.jpg", to: "/collections?category=jeans" },
+      { id: "c4", title: "SHORTS", img: "/images/quanxanh3.jpg", to: "/collections?category=shorts" },
     ];
   }, [categories]);
 

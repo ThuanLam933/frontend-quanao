@@ -621,7 +621,6 @@ function ColorEditDialog({ open, onClose, item, onSave, slugify }) {
 }
 
 
-
 /* ---------------------- Sizes ---------------------- */
 function SizesPage({ setSnack }) {
   const [items, setItems] = useState([]);
@@ -804,6 +803,10 @@ function SizeEditDialog({ open, onClose, item, onSave, slugify }) {
 
 /* ---------------------- Products ---------------------- */
 /* ---------------------- Products (with image upload) ---------------------- */
+/* ---------------------- Products ---------------------- */
+/* ProductsPage (updated: loads categories/colors/sizes and passes to dialog) */
+/* ---------------------- Products ---------------------- */
+/* ProductsPage (status: 1 = còn hàng, 0 = hết hàng) */
 function ProductsPage({ setSnack }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -813,7 +816,13 @@ function ProductsPage({ setSnack }) {
   const PAGE_SIZE = 12;
   const [totalPages, setTotalPages] = useState(1);
 
-  const fetchProducts = useCallback(async (p=1) => {
+  // option lists
+  const [categories, setCategories] = useState([]);
+  const [colors, setColors] = useState([]);
+  const [sizes, setSizes] = useState([]);
+  const [optsLoading, setOptsLoading] = useState(false);
+
+  const fetchProducts = useCallback(async (p = 1) => {
     setLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/products`);
@@ -829,115 +838,143 @@ function ProductsPage({ setSnack }) {
     } finally { setLoading(false); }
   }, [setSnack]);
 
-  useEffect(() => { fetchProducts(); }, [fetchProducts]);
+  const fetchOptions = useCallback(async () => {
+    setOptsLoading(true);
+    try {
+      const [cRes, colRes, sRes] = await Promise.all([
+        fetch(`${API_BASE}/api/categories`),
+        fetch(`${API_BASE}/api/colors`),
+        fetch(`${API_BASE}/api/sizes`)
+      ]);
+
+      const [cData, colData, sData] = await Promise.all([
+        cRes.ok ? cRes.json().catch(()=>[]) : [],
+        colRes.ok ? colRes.json().catch(()=>[]) : [],
+        sRes.ok ? sRes.json().catch(()=>[]) : []
+      ]);
+
+      const normalize = (d) => Array.isArray(d) ? d : (d.data ?? d.items ?? []);
+      setCategories(normalize(cData));
+      setColors(normalize(colData));
+      setSizes(normalize(sData));
+    } catch (err) {
+      console.error("fetchOptions", err);
+      setSnack({ severity: "warning", message: "Không tải được options (categories/colors/sizes)." });
+      setCategories([]); setColors([]); setSizes([]);
+    } finally { setOptsLoading(false); }
+  }, [setSnack]);
+
+  useEffect(() => { fetchProducts(); fetchOptions(); }, [fetchProducts, fetchOptions]);
 
   const onEdit = (item) => {
-  setEditing({
-    ...item,
-    image_url: item.image_url ?? (item.image ?? null),
-    images: item.images ?? [],
-    // map first detail so form shows price/color/size if product has details
-    price: item.first_detail?.price ?? '',
-    colors_id: item.first_detail?.color?.id ?? item.colors_id ?? '',
-    sizes_id: item.first_detail?.size?.id ?? item.sizes_id ?? '',
-    quantity: item.first_detail?.quantity ?? 0,
-  });
-  setEditOpen(true);
-};
+    setEditing({
+      ...item,
+      image_url: item.image_url ?? (item.image ?? null),
+      images: item.images ?? [],
+      price: item.first_detail?.price ?? item.price ?? '',
+      colors_id: item.first_detail?.color?.id ?? item.colors_id ?? (item.color_id ?? ""),
+      sizes_id: item.first_detail?.size?.id ?? item.sizes_id ?? (item.size_id ?? ""),
+      categories_id: item.categories_id ?? item.category_id ?? (item.category?.id ?? ""),
+      quantity: item.first_detail?.quantity ?? 0,
+      // ensure status normalized for UI select (string or number accepted)
+      status: item.status ?? 1,
+    });
+    setEditOpen(true);
+  };
 
-  const onCreate = () => { setEditing({ name: "", description: "", price: 0, status: 0, categories_id: "",colors_id:"",sizes_id:"", images: [], image_url: "" }); setEditOpen(true); };
+  const onCreate = () => {
+    setEditing({
+      name: "",
+      description: "",
+      price: 0,
+      status: 1, // default: còn hàng
+      categories_id: "",
+      colors_id: "",
+      sizes_id: "",
+      images: [],
+      image_url: ""
+    });
+    setEditOpen(true);
+  };
 
-  // handleSave now accepts (obj, filesArray)
+  // handleSave (same signature as before)
   const handleSave = async (obj, files = []) => {
-  const token = localStorage.getItem("access_token");
-  if (!obj || !obj.name || String(obj.name).trim() === "") {
-    setSnack({ severity: "error", message: "Tên sản phẩm không được để trống" });
-    return;
-  }
-
-  setLoading(true);
-  try {
-    const isUpdate = !!obj.id;
-    const endpoint = isUpdate ? `${API_BASE}/api/products/${obj.id}` : `${API_BASE}/api/products`;
-    const fd = new FormData();
-
-    // clone obj and normalize basic fields
-    const payload = { ...obj };
-    // normalize status to 0/1
-    if (payload.status === true || payload.status === "true" || payload.status === 1 || payload.status === "1") payload.status = 1;
-    else payload.status = payload.status ? 1 : 0;
-
-    // Build details array from price/color/size fields if present
-    const details = [];
-    if (payload.price || payload.colors_id || payload.sizes_id || payload.quantity) {
-      details.push({
-        // if editing an existing product_detail set id? we don't have id in single-detail UI, so new detail will be created
-        price: payload.price !== undefined && payload.price !== "" ? payload.price : null,
-        color_id: payload.colors_id || null,
-        size_id: payload.sizes_id || null,
-        quantity: payload.quantity ?? 0,
-        status: payload.detail_status ?? 1,
-      });
-    }
-
-    // Remove detail-local fields from top-level product payload before appending
-    delete payload.price;
-    delete payload.colors_id;
-    delete payload.sizes_id;
-    delete payload.quantity;
-    delete payload.detail_status;
-
-    // Append product scalar fields
-    Object.keys(payload).forEach(k => {
-      if (payload[k] !== undefined && payload[k] !== null) fd.append(k, payload[k]);
-    });
-
-    // If there are details, append as JSON string
-    if (details.length) {
-      fd.append('details', JSON.stringify(details));
-    }
-
-    // Append files (images[])
-    if (files && files.length) {
-      for (let i = 0; i < files.length; i++) {
-        fd.append('images[]', files[i], files[i].name);
-      }
-    }
-
-    // If update, use _method=PUT so Laravel accepts multipart form update
-    if (isUpdate) fd.append('_method', 'POST');
-
-    const res = await fetch(endpoint, {
-      method: 'POST', // send as POST with _method when updating
-      headers: {
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        // DO NOT set Content-Type
-      },
-      body: fd,
-    });
-
-    if (res.ok) {
-      setSnack({ severity: 'success', message: 'Lưu thành công' });
-      setEditOpen(false);
-      fetchProducts();
+    const token = localStorage.getItem("access_token");
+    if (!obj || !obj.name || String(obj.name).trim() === "") {
+      setSnack({ severity: "error", message: "Tên sản phẩm không được để trống" });
       return;
-    } else {
-      const txt = await res.text().catch(() => "");
-      console.error("save product failed:", endpoint, res.status, txt);
-      try {
-        const j = JSON.parse(txt || "{}");
-        const errMsg = j.message || txt || `Lưu thất bại (${res.status})`;
-        setSnack({ severity: "error", message: errMsg });
-      } catch {
-        setSnack({ severity: "error", message: `Lưu thất bại (${res.status}). Xem console.` });
-      }
     }
-  } catch (err) {
-    console.error("save product error", err);
-    setSnack({ severity: "error", message: "Lỗi khi lưu sản phẩm" });
-  } finally { setLoading(false); }
-};
 
+    setLoading(true);
+    try {
+      const isUpdate = !!obj.id;
+      const endpoint = isUpdate ? `${API_BASE}/api/products/${obj.id}` : `${API_BASE}/api/products`;
+      const fd = new FormData();
+
+      const payload = { ...obj };
+      // normalize status: treat truthy/"1"/1 as 1, otherwise 0
+      if (payload.status === true || payload.status === "true" || payload.status === "1" || payload.status === 1) payload.status = 1;
+      else payload.status = 0;
+
+      // details array
+      const details = [];
+      if (payload.price || payload.colors_id || payload.sizes_id || payload.quantity) {
+        details.push({
+          price: payload.price !== undefined && payload.price !== "" ? payload.price : null,
+          color_id: payload.colors_id || null,
+          size_id: payload.sizes_id || null,
+          quantity: payload.quantity ?? 0,
+          status: payload.detail_status ?? 1,
+        });
+      }
+
+      delete payload.price;
+      delete payload.colors_id;
+      delete payload.sizes_id;
+      delete payload.quantity;
+      delete payload.detail_status;
+
+      Object.keys(payload).forEach(k => {
+        if (payload[k] !== undefined && payload[k] !== null) fd.append(k, payload[k]);
+      });
+
+      if (details.length) fd.append('details', JSON.stringify(details));
+
+      if (files && files.length) {
+        for (let i = 0; i < files.length; i++) {
+          fd.append('images[]', files[i], files[i].name);
+        }
+      }
+
+      if (isUpdate) fd.append('_method', 'POST');
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: fd,
+      });
+
+      if (res.ok) {
+        setSnack({ severity: 'success', message: 'Lưu thành công' });
+        setEditOpen(false);
+        fetchProducts();
+        return;
+      } else {
+        const txt = await res.text().catch(() => "");
+        console.error("save product failed:", endpoint, res.status, txt);
+        try {
+          const j = JSON.parse(txt || "{}");
+          const errMsg = j.message || txt || `Lưu thất bại (${res.status})`;
+          setSnack({ severity: "error", message: errMsg });
+        } catch {
+          setSnack({ severity: "error", message: `Lưu thất bại (${res.status}). Xem console.` });
+        }
+      }
+    } catch (err) {
+      console.error("save product error", err);
+      setSnack({ severity: "error", message: "Lỗi khi lưu sản phẩm" });
+    } finally { setLoading(false); }
+  };
 
   const handleDelete = async (id) => {
     const token = localStorage.getItem("access_token");
@@ -996,12 +1033,17 @@ function ProductsPage({ setSnack }) {
                     <TableCell>{p.first_detail?.price ? Number(p.first_detail.price).toLocaleString("vi-VN")+"₫" : "—"}</TableCell>
                     <TableCell>{p.slug ?? "-"}</TableCell>
                     <TableCell>{p.description ?? "-"}</TableCell>
-                    <TableCell>{p.status ?? "-"}</TableCell>
-                    <TableCell>{p.categories_id ?? "-"}</TableCell>
-                    <TableCell>{ p.first_detail?.color?.name ?? p.first_detail?.color?.id ?? "—" }</TableCell>
-                    <TableCell>{ p.first_detail?.size?.name ?? p.first_detail?.size?.id ?? "—" }</TableCell>
                     <TableCell>
-                      {/* backend returns image_url (already asset() normalized) */}
+                      {(p.status === 1 || p.status === "1" || p.status === true) ? (
+                        <Typography variant="body2" component="span" color="success.main">Còn hàng</Typography>
+                      ) : (
+                        <Typography variant="body2" component="span" color="text.secondary">Hết hàng</Typography>
+                      )}
+                    </TableCell>
+                    <TableCell>{p.categories_id ?? (p.category?.name ?? "-")}</TableCell>
+                    <TableCell>{ p.first_detail?.color?.name ?? "—" }</TableCell>
+                    <TableCell>{ p.first_detail?.size?.name ?? "—" }</TableCell>
+                    <TableCell>
                       {p.image_url ? (
                         <img src={p.image_url} alt="" style={{ width: 60, height: 40, objectFit: "cover", borderRadius: 4 }} />
                       ) : (Array.isArray(p.images) && p.images.length ? (
@@ -1024,13 +1066,22 @@ function ProductsPage({ setSnack }) {
         )}
       </Paper>
 
-      <ProductEditDialog open={editOpen} onClose={()=>setEditOpen(false)} item={editing} onSave={handleSave}/>
+      <ProductEditDialog
+        open={editOpen}
+        onClose={()=>setEditOpen(false)}
+        item={editing}
+        onSave={handleSave}
+        categories={categories}
+        colors={colors}
+        sizes={sizes}
+        optsLoading={optsLoading}
+      />
     </Box>
   );
 }
 
-/* Product edit/create dialog with image input & preview */
-function ProductEditDialog({ open, onClose, item, onSave }) {
+/* Product edit/create dialog with status select (1 = còn hàng, 0 = hết hàng) */
+function ProductEditDialog({ open, onClose, item, onSave, categories = [], colors = [], sizes = [], optsLoading = false }) {
   const [form, setForm] = useState(item ?? null);
   const [files, setFiles] = useState([]);
   const [previews, setPreviews] = useState([]);
@@ -1051,7 +1102,6 @@ function ProductEditDialog({ open, onClose, item, onSave }) {
       readers.push(r);
       r.onload = (e) => {
         results[idx] = e.target.result;
-        // when all ready setPreviews
         if (results.filter(Boolean).length === files.length) setPreviews([...results]);
       };
       r.readAsDataURL(f);
@@ -1069,12 +1119,15 @@ function ProductEditDialog({ open, onClose, item, onSave }) {
   const handleSaveClick = async () => {
     setSaving(true);
     try {
-      // normalize some fields before sending
       const payload = { ...form };
-      // ensure status is numeric 0/1
-      payload.status = payload.status === true || payload.status === "1" || payload.status === 1 ? 1 : (payload.status === "0" || payload.status === 0 ? 0 : payload.status);
-      // ensure categories_id exists
-      if (payload.categories_id === "") payload.categories_id = null;
+      // normalize status strictly to 1 or 0
+      if (payload.status === true || payload.status === "true" || payload.status === "1" || payload.status === 1) payload.status = 1;
+      else payload.status = 0;
+
+      if (payload.categories_id === "" || payload.categories_id === null) payload.categories_id = null;
+      if (payload.colors_id === "" || payload.colors_id === null) payload.colors_id = null;
+      if (payload.sizes_id === "" || payload.sizes_id === null) payload.sizes_id = null;
+
       await onSave(payload, files);
     } finally {
       setSaving(false);
@@ -1088,10 +1141,75 @@ function ProductEditDialog({ open, onClose, item, onSave }) {
         <TextField label="Name" fullWidth value={form.name || ""} onChange={(e)=> setForm({...form, name: e.target.value})} sx={{ mt:1 }} />
         <TextField label="Price" fullWidth value={form.price ?? ""} onChange={(e)=> setForm({...form, price: e.target.value})} sx={{ mt:1 }} />
         <TextField label="Description" fullWidth multiline minRows={3} value={form.description ?? ""} onChange={(e)=> setForm({...form, description: e.target.value})} sx={{ mt:1 }} />
-        <TextField label="Status" fullWidth value={String(form.status ?? "")} onChange={(e)=> setForm({...form, status: e.target.value})} sx={{ mt:1 }} />
-        <TextField label="Categories id" fullWidth value={form.categories_id ?? ""} onChange={(e)=> setForm({...form, categories_id: e.target.value})} sx={{ mt:1 }} />
-        <TextField label="Color id" fullWidth value={form.colors_id ?? ""} onChange={(e)=> setForm({...form, colors_id: e.target.value})} sx={{ mt:1 }} />
-        <TextField label="Size id" fullWidth value={form.sizes_id ?? ""} onChange={(e)=> setForm({...form, sizes_id: e.target.value})} sx={{ mt:1 }} />
+
+        {/* Status select: 1 = Còn hàng, 0 = Hết hàng */}
+        <TextField
+          select
+          label="Status"
+          fullWidth
+          value={String(form.status ?? "1")}
+          onChange={(e) => setForm({ ...form, status: e.target.value })}
+          sx={{ mt: 1 }}
+          helperText="1 = Còn hàng, 0 = Hết hàng"
+        >
+          <MenuItem value={"1"}>Còn hàng</MenuItem>
+          <MenuItem value={"0"}>Hết hàng</MenuItem>
+        </TextField>
+
+        {/* Category select */}
+        <TextField
+          select
+          label="Category"
+          fullWidth
+          value={form.categories_id ?? ""}
+          onChange={(e) => setForm({ ...form, categories_id: e.target.value })}
+          sx={{ mt: 1 }}
+          helperText={optsLoading ? "Loading categories..." : ""}
+        >
+          <MenuItem value="">-- none --</MenuItem>
+          {categories.map(c => (
+            <MenuItem key={c.id ?? c.slug ?? c.name} value={c.id ?? c.slug ?? c.name}>
+              {c.name ?? c.title ?? c.slug}
+            </MenuItem>
+          ))}
+        </TextField>
+
+        {/* Color select */}
+        <TextField
+          select
+          label="Color"
+          fullWidth
+          value={form.colors_id ?? ""}
+          onChange={(e) => setForm({ ...form, colors_id: e.target.value })}
+          sx={{ mt: 1 }}
+          helperText={optsLoading ? "Loading colors..." : ""}
+        >
+          <MenuItem value="">-- none --</MenuItem>
+          {colors.map(c => (
+            <MenuItem key={c.id ?? c.slug ?? c.name} value={c.id ?? c.slug ?? c.name}>
+              {c.name ?? c.title ?? c.slug}
+            </MenuItem>
+          ))}
+        </TextField>
+
+        {/* Size select */}
+        <TextField
+          select
+          label="Size"
+          fullWidth
+          value={form.sizes_id ?? ""}
+          onChange={(e) => setForm({ ...form, sizes_id: e.target.value })}
+          sx={{ mt: 1 }}
+          helperText={optsLoading ? "Loading sizes..." : ""}
+        >
+          <MenuItem value="">-- none --</MenuItem>
+          {sizes.map(s => (
+            <MenuItem key={s.id ?? s.slug ?? s.name} value={s.id ?? s.slug ?? s.name}>
+              {s.name ?? s.title ?? s.slug}
+            </MenuItem>
+          ))}
+        </TextField>
+
         <Box sx={{ mt:2 }}>
           <Typography variant="subtitle2">Images</Typography>
           <input type="file" accept="image/*" multiple onChange={handleFilesChange} style={{ marginTop: 8 }} />
@@ -1101,7 +1219,6 @@ function ProductEditDialog({ open, onClose, item, onSave }) {
                 <img src={p} alt={`preview-${idx}`} style={{ maxWidth:"100%", maxHeight:"100%" }} />
               </Paper>
             ))}
-            {/* existing image_url if editing and not uploading new previews */}
             {(!previews.length && form.image_url) && (
               <Paper sx={{ width:120, height:90, display:"flex", alignItems:"center", justifyContent:"center" }}>
                 <img src={form.image_url} alt="existing" style={{ maxWidth:"100%", maxHeight:"100%" }} />
@@ -1117,7 +1234,6 @@ function ProductEditDialog({ open, onClose, item, onSave }) {
     </Dialog>
   );
 }
-
 
 
 /* ---------------------- Orders ---------------------- */
