@@ -1628,77 +1628,387 @@ function StockPage({ setSnack }) {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [openCreate, setOpenCreate] = useState(false);
-  const [form, setForm] = useState({ product_detail_id: "", qty: 0, note: "" });
 
+  const [suppliers, setSuppliers] = useState([]);
+  const [productDetails, setProductDetails] = useState([]);
+  const [optsLoading, setOptsLoading] = useState(false);
+
+  // form supports either selecting an existing supplier (suppliers_id)
+  // or entering supplier_manual (name/email/address/phone)
+  const [form, setForm] = useState({
+    suppliers_id: "",
+    supplier_manual: { name: "", email: "", address: "", phone: "" },
+    note: "",
+    import_date: new Date().toISOString().slice(0, 10),
+    items: [{ product_detail_id: "", qty: 1, price: 0 }],
+  });
+
+  // safe token getter (handles stringified token cases)
+  const getStoredToken = () => {
+    let token = localStorage.getItem("access_token") || localStorage.getItem("token") || null;
+    if (!token) return null;
+    try {
+      const maybe = JSON.parse(token);
+      if (typeof maybe === "string") token = maybe;
+    } catch (e) {}
+    return String(token).trim();
+  };
+
+  // fetch receipts (admin route)
   const fetchStock = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/stock-entries`); // create endpoint in backend
+      const token = getStoredToken();
+      const res = await fetch(`${API_BASE}/api/admin/receipts`, {
+        method: "GET",
+        headers: {
+          "Accept": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
       if (!res.ok) throw new Error("stock fetch failed");
       const data = await res.json();
-      setEntries(Array.isArray(data) ? data : data.data ?? []);
+      const arr = Array.isArray(data) ? data : (data.data ?? data.items ?? []);
+      setEntries(arr);
     } catch (err) {
       console.error(err);
       setSnack({ severity: "error", message: "Không tải stock entries" });
       setEntries([]);
-    } finally { setLoading(false); }
+    } finally {
+      setLoading(false);
+    }
   }, [setSnack]);
 
-  useEffect(()=> { fetchStock(); }, [fetchStock]);
-
-  const handleCreate = async () => {
-    const token = localStorage.getItem("access_token");
+  // fetch suppliers and product details for selects
+  const fetchOptions = useCallback(async () => {
+    setOptsLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/stock-entries`, {
+      const token = getStoredToken();
+      const [sRes, pdRes] = await Promise.all([
+        fetch(`${API_BASE}/api/admin/suppliers`, { headers: { Accept: "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) } }),
+        fetch(`${API_BASE}/api/product-details`, { headers: { Accept: "application/json" } }),
+      ]);
+
+      const sData = sRes.ok ? await sRes.json().catch(() => []) : [];
+      const pdData = pdRes.ok ? await pdRes.json().catch(() => []) : [];
+
+      const normalize = (d) => Array.isArray(d) ? d : (d.data ?? d.items ?? []);
+      setSuppliers(normalize(sData));
+      setProductDetails(normalize(pdData));
+    } catch (err) {
+      console.error("fetchOptions", err);
+      setSnack({ severity: "warning", message: "Không tải được suppliers hoặc product details" });
+      setSuppliers([]); setProductDetails([]);
+    } finally {
+      setOptsLoading(false);
+    }
+  }, [setSnack]);
+
+  useEffect(() => { fetchStock(); fetchOptions(); }, [fetchStock, fetchOptions]);
+
+  // UI helpers: items management
+  const addItemRow = () => {
+    setForm(f => ({ ...f, items: [...f.items, { product_detail_id: "", qty: 1, price: 0 }] }));
+  };
+  const removeItemRow = (idx) => {
+    setForm(f => ({ ...f, items: f.items.filter((_, i) => i !== idx) }));
+  };
+  const updateItem = (idx, field, value) => {
+    setForm(f => {
+      const items = f.items.map((it, i) => i === idx ? ({ ...it, [field]: value }) : it);
+      return { ...f, items };
+    });
+  };
+
+  // create supplier (used when user types supplier manually)
+  const createSupplier = async (supplierData) => {
+    const token = getStoredToken();
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/suppliers`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-        body: JSON.stringify(form),
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(supplierData),
       });
-      if (!res.ok) throw new Error("create failed");
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        console.error("create supplier failed:", res.status, txt);
+        throw new Error(txt || "Create supplier failed");
+      }
+      const created = await res.json();
+      return created.id ?? created.id; // expect id returned
+    } catch (err) {
+      console.error(err);
+      throw err;
+    }
+  };
+
+  // create receipt: if suppliers_id empty but manual supplier provided, create supplier first
+  const handleCreate = async () => {
+    const token = getStoredToken();
+
+    // validate supplier presence (either selected or manual name)
+    const manual = form.supplier_manual || {};
+    const hasManual = manual.name && String(manual.name).trim() !== "";
+    if (!form.suppliers_id && !hasManual) {
+      setSnack({ severity: "error", message: "Vui lòng chọn supplier hoặc nhập supplier mới" });
+      return;
+    }
+
+    // validate items
+    if (!Array.isArray(form.items) || form.items.length === 0) {
+      setSnack({ severity: "error", message: "Thêm ít nhất 1 item" });
+      return;
+    }
+    for (const it of form.items) {
+      if (!it.product_detail_id) { setSnack({ severity: "error", message: "Chọn product detail cho tất cả item" }); return; }
+      if (!it.qty || Number(it.qty) <= 0) { setSnack({ severity: "error", message: "Quantity phải lớn hơn 0" }); return; }
+      if (it.price === "" || Number(it.price) < 0) { setSnack({ severity: "error", message: "Price không hợp lệ" }); return; }
+    }
+
+    try {
+      setLoading(true);
+
+      let supplierId = form.suppliers_id;
+      if (!supplierId && hasManual) {
+        // build supplier payload (only include provided fields)
+        const payloadSupplier = {
+          name: manual.name,
+          email: manual.email || "",
+          address: manual.address || "",
+          phone: manual.phone || "",
+        };
+        try {
+          supplierId = await createSupplier(payloadSupplier);
+          // refresh suppliers list so select shows new supplier if needed later
+          fetchOptions();
+        } catch (err) {
+          setSnack({ severity: "error", message: "Tạo supplier thất bại" });
+          return;
+        }
+      }
+
+      // now create receipt
+      const payload = {
+        suppliers_id: supplierId,
+        note: form.note || "",
+        import_date: form.import_date || new Date().toISOString().slice(0, 10),
+        items: form.items.map(it => ({
+          product_detail_id: it.product_detail_id,
+          quantity: Number(it.qty),
+          price: Number(it.price),
+        })),
+      };
+
+      const res = await fetch(`${API_BASE}/api/admin/receipts`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        console.error("create receipt failed:", res.status, txt);
+        let errMsg = "Tạo phiếu nhập thất bại";
+        try { const j = JSON.parse(txt || "{}"); errMsg = j.message || txt || errMsg; } catch {}
+        setSnack({ severity: "error", message: errMsg });
+        return;
+      }
+
+      await res.json();
       setSnack({ severity: "success", message: "Tạo phiếu nhập thành công" });
       setOpenCreate(false);
+      // reset form
+      setForm({
+        suppliers_id: "",
+        supplier_manual: { name: "", email: "", address: "", phone: "" },
+        note: "",
+        import_date: new Date().toISOString().slice(0, 10),
+        items: [{ product_detail_id: "", qty: 1, price: 0 }],
+      });
       fetchStock();
     } catch (err) {
       console.error(err);
       setSnack({ severity: "error", message: "Tạo thất bại" });
+    } finally {
+      setLoading(false);
     }
   };
 
+  // render
   return (
     <Box>
-      <Stack direction="row" justifyContent="space-between" sx={{ mb:2 }}>
-        <Typography variant="h6">Stock Entries</Typography>
-        <Button onClick={()=> setOpenCreate(true)} variant="contained">Create Entry</Button>
+      <Stack direction="row" justifyContent="space-between" sx={{ mb: 2 }}>
+        <Typography variant="h6">Stock Entries (Receipts)</Typography>
+        <Button onClick={() => setOpenCreate(true)} variant="contained">Create Receipt</Button>
       </Stack>
 
       <Paper>
-        {loading ? <Box sx={{ p:3, display:"flex", justifyContent:"center" }}><CircularProgress/></Box> : (
+        {loading ? (
+          <Box sx={{ p: 3, display: "flex", justifyContent: "center" }}><CircularProgress /></Box>
+        ) : (
           <TableContainer>
             <Table>
-              <TableHead><TableRow><TableCell>#</TableCell><TableCell>Product detail</TableCell><TableCell>Qty</TableCell><TableCell>Note</TableCell></TableRow></TableHead>
+              <TableHead>
+                <TableRow>
+                  <TableCell>#</TableCell>
+                  <TableCell>Supplier</TableCell>
+                  <TableCell>Import date</TableCell>
+                  <TableCell>Total</TableCell>
+                  <TableCell>Note</TableCell>
+                </TableRow>
+              </TableHead>
               <TableBody>
-                {entries.map(e => <TableRow key={e.id}><TableCell>{e.id}</TableCell><TableCell>{e.product_detail_id}</TableCell><TableCell>{e.qty}</TableCell><TableCell>{e.note}</TableCell></TableRow>)}
+                {entries.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={5} align="center" sx={{ py: 6 }}>Không có phiếu nhập</TableCell>
+                  </TableRow>
+                ) : entries.map(e => (
+                  <TableRow key={e.id}>
+                    <TableCell>{e.id}</TableCell>
+                    <TableCell>{e.supplier?.name ?? (e.suppliers_id ?? "—")}</TableCell>
+                    <TableCell>{e.import_date ?? e.created_at ?? "—"}</TableCell>
+                    <TableCell>{e.total_price ? Number(e.total_price).toLocaleString("vi-VN") + "₫" : "—"}</TableCell>
+                    <TableCell>{e.note ?? "—"}</TableCell>
+                  </TableRow>
+                ))}
               </TableBody>
             </Table>
           </TableContainer>
         )}
       </Paper>
 
-      <Dialog open={openCreate} onClose={()=> setOpenCreate(false)}>
-        <DialogTitle>Create stock entry</DialogTitle>
+      <Dialog open={openCreate} onClose={() => setOpenCreate(false)} maxWidth="md" fullWidth>
+        <DialogTitle>Create receipt</DialogTitle>
         <DialogContent>
-          <TextField label="Product detail id" fullWidth value={form.product_detail_id} onChange={e=> setForm({...form, product_detail_id: e.target.value})} sx={{ mt:1 }} />
-          <TextField label="Quantity" fullWidth value={form.qty} onChange={e=> setForm({...form, qty: e.target.value})} sx={{ mt:1 }} />
-          <TextField label="Note" fullWidth multiline value={form.note} onChange={e=> setForm({...form, note: e.target.value})} sx={{ mt:1 }} />
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            {/* Choose existing supplier OR enter manually */}
+            <TextField
+              select
+              label="Select existing supplier (optional)"
+              fullWidth
+              value={form.suppliers_id}
+              onChange={(e) => setForm({ ...form, suppliers_id: e.target.value })}
+              helperText={optsLoading ? "Loading suppliers..." : "Bạn có thể chọn supplier có sẵn hoặc nhập tay bên dưới"}
+            >
+              <MenuItem value="">-- none / use manual input --</MenuItem>
+              {suppliers.map(s => (
+                <MenuItem key={s.id} value={s.id}>{s.name}</MenuItem>
+              ))}
+            </TextField>
+
+            <Typography variant="body2" color="text.secondary">Or enter supplier manually:</Typography>
+            <Stack direction="row" spacing={1}>
+              <TextField
+                label="Supplier name"
+                fullWidth
+                value={form.supplier_manual.name}
+                onChange={(e) => setForm({ ...form, supplier_manual: { ...form.supplier_manual, name: e.target.value } })}
+              />
+              <TextField
+                label="Phone"
+                sx={{ width: 200 }}
+                value={form.supplier_manual.phone}
+                onChange={(e) => setForm({ ...form, supplier_manual: { ...form.supplier_manual, phone: e.target.value } })}
+              />
+            </Stack>
+            <TextField
+              label="Email"
+              fullWidth
+              value={form.supplier_manual.email}
+              onChange={(e) => setForm({ ...form, supplier_manual: { ...form.supplier_manual, email: e.target.value } })}
+            />
+            <TextField
+              label="Address"
+              fullWidth
+              value={form.supplier_manual.address}
+              onChange={(e) => setForm({ ...form, supplier_manual: { ...form.supplier_manual, address: e.target.value } })}
+            />
+
+            <TextField
+              label="Import date"
+              type="date"
+              fullWidth
+              value={form.import_date}
+              onChange={(e) => setForm({ ...form, import_date: e.target.value })}
+              InputLabelProps={{ shrink: true }}
+            />
+
+            <TextField
+              label="Note"
+              fullWidth
+              multiline
+              minRows={2}
+              value={form.note}
+              onChange={(e) => setForm({ ...form, note: e.target.value })}
+            />
+
+            <Box>
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>Items</Typography>
+              <Stack spacing={1}>
+                {form.items.map((it, idx) => (
+                  <Paper key={idx} sx={{ p: 1, display: "flex", gap: 1, alignItems: "center" }}>
+                    <TextField
+                      select
+                      label="Product detail"
+                      value={it.product_detail_id}
+                      onChange={(e) => updateItem(idx, 'product_detail_id', e.target.value)}
+                      sx={{ minWidth: 240 }}
+                    >
+                      <MenuItem value="">-- select --</MenuItem>
+                      {productDetails.map(pd => (
+                        <MenuItem key={pd.id} value={pd.id}>
+                          {pd.product?.name ? `${pd.product.name} #${pd.id}` : `#${pd.id}`}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+
+                    <TextField
+                      label="Qty"
+                      type="number"
+                      value={it.qty}
+                      onChange={(e) => updateItem(idx, 'qty', e.target.value)}
+                      sx={{ width: 120 }}
+                    />
+
+                    <TextField
+                      label="Price"
+                      type="number"
+                      value={it.price}
+                      onChange={(e) => updateItem(idx, 'price', e.target.value)}
+                      sx={{ width: 160 }}
+                      helperText="Price per unit"
+                    />
+
+                    <Box sx={{ ml: 'auto' }}>
+                      <Button size="small" color="error" onClick={() => removeItemRow(idx)} disabled={form.items.length === 1}>Remove</Button>
+                    </Box>
+                  </Paper>
+                ))}
+              </Stack>
+
+              <Box sx={{ mt: 1 }}>
+                <Button onClick={addItemRow}>Add item</Button>
+              </Box>
+            </Box>
+          </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={()=> setOpenCreate(false)}>Cancel</Button>
+          <Button onClick={() => setOpenCreate(false)}>Cancel</Button>
           <Button variant="contained" onClick={handleCreate}>Create</Button>
         </DialogActions>
       </Dialog>
     </Box>
   );
 }
+
 
 /* ---------------------- Comments ---------------------- */
 function CommentsPage({ setSnack }) {
