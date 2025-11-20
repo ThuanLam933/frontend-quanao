@@ -149,7 +149,6 @@ export default function AdminPanel() {
             {page === "returns" && <ReturnsPage setSnack={setSnack} />}
 
             {page === "stock" && <StockPage setSnack={setSnack} />}
-
             {page === "comments" && <CommentsPage setSnack={setSnack} />}
 
             {page === "images" && <ImageAdminPage setSnack={setSnack} />}
@@ -807,6 +806,7 @@ function SizeEditDialog({ open, onClose, item, onSave, slugify }) {
 /* ProductsPage (updated: loads categories/colors/sizes and passes to dialog) */
 /* ---------------------- Products ---------------------- */
 /* ProductsPage (status: 1 = còn hàng, 0 = hết hàng) */
+/* ---------------------- Products (ProductsPage + ProductEditDialog) ---------------------- */
 function ProductsPage({ setSnack }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -867,6 +867,8 @@ function ProductsPage({ setSnack }) {
   useEffect(() => { fetchProducts(); fetchOptions(); }, [fetchProducts, fetchOptions]);
 
   const onEdit = (item) => {
+    // derive quantity from first_detail if available
+    const qty = item.first_detail?.quantity ?? item.quantity ?? 0;
     setEditing({
       ...item,
       image_url: item.image_url ?? (item.image ?? null),
@@ -875,9 +877,10 @@ function ProductsPage({ setSnack }) {
       colors_id: item.first_detail?.color?.id ?? item.colors_id ?? (item.color_id ?? ""),
       sizes_id: item.first_detail?.size?.id ?? item.sizes_id ?? (item.size_id ?? ""),
       categories_id: item.categories_id ?? item.category_id ?? (item.category?.id ?? ""),
-      quantity: item.first_detail?.quantity ?? 0,
-      // ensure status normalized for UI select (string or number accepted)
-      status: item.status ?? 1,
+      // keep numeric quantity so user can edit value if needed
+      quantity: Number(qty),
+      // form status default = based on quantity (but final source of truth is product_detail quantity)
+      status: Number(qty) > 0 ? 1 : 0,
     });
     setEditOpen(true);
   };
@@ -892,7 +895,8 @@ function ProductsPage({ setSnack }) {
       colors_id: "",
       sizes_id: "",
       images: [],
-      image_url: ""
+      image_url: "",
+      quantity: 0,
     });
     setEditOpen(true);
   };
@@ -912,30 +916,42 @@ function ProductsPage({ setSnack }) {
       const fd = new FormData();
 
       const payload = { ...obj };
+      // đảm bảo có description (backend có thể required)
+      if (payload.description === undefined || payload.description === null) payload.description = "";
+
       // normalize status: treat truthy/"1"/1 as 1, otherwise 0
       if (payload.status === true || payload.status === "true" || payload.status === "1" || payload.status === 1) payload.status = 1;
       else payload.status = 0;
 
-      // details array
+      // --- Build details: kiểm tra !== undefined để chấp nhận giá trị 0 ---
       const details = [];
-      if (payload.price || payload.colors_id || payload.sizes_id || payload.quantity) {
+      if (
+        payload.price !== undefined ||
+        payload.colors_id !== undefined ||
+        payload.sizes_id !== undefined ||
+        payload.quantity !== undefined
+      ) {
         details.push({
           price: payload.price !== undefined && payload.price !== "" ? payload.price : null,
           color_id: payload.colors_id || null,
           size_id: payload.sizes_id || null,
-          quantity: payload.quantity ?? 0,
-          status: payload.detail_status ?? 1,
+          // đảm bảo gửi số (0 chấp nhận)
+          quantity: payload.quantity !== undefined && payload.quantity !== null ? Number(payload.quantity) : 0,
+          status: payload.detail_status !== undefined ? payload.detail_status : 1,
         });
       }
 
+      // remove fields that are moved into details
       delete payload.price;
       delete payload.colors_id;
       delete payload.sizes_id;
       delete payload.quantity;
       delete payload.detail_status;
 
+      // append other payload fields to FormData (0 and "" will be appended)
       Object.keys(payload).forEach(k => {
-        if (payload[k] !== undefined && payload[k] !== null) fd.append(k, payload[k]);
+        const v = payload[k];
+        if (v !== undefined && v !== null) fd.append(k, v);
       });
 
       if (details.length) fd.append('details', JSON.stringify(details));
@@ -946,10 +962,11 @@ function ProductsPage({ setSnack }) {
         }
       }
 
-      if (isUpdate) fd.append('_method', 'POST');
+      // When update: use method override PUT (Laravel)
+      if (isUpdate) fd.append('_method', 'PUT');
 
       const res = await fetch(endpoint, {
-        method: 'POST',
+        method: 'POST', // use POST so _method works
         headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: fd,
       });
@@ -957,7 +974,7 @@ function ProductsPage({ setSnack }) {
       if (res.ok) {
         setSnack({ severity: 'success', message: 'Lưu thành công' });
         setEditOpen(false);
-        fetchProducts();
+        await fetchProducts();
         return;
       } else {
         const txt = await res.text().catch(() => "");
@@ -975,6 +992,7 @@ function ProductsPage({ setSnack }) {
       setSnack({ severity: "error", message: "Lỗi khi lưu sản phẩm" });
     } finally { setLoading(false); }
   };
+
 
   const handleDelete = async (id) => {
     const token = localStorage.getItem("access_token");
@@ -1015,6 +1033,7 @@ function ProductsPage({ setSnack }) {
                   <TableCell>#</TableCell>
                   <TableCell>Name</TableCell>
                   <TableCell>Price</TableCell>
+                  <TableCell>Quantity</TableCell>
                   <TableCell>Slug</TableCell>
                   <TableCell>Description</TableCell>
                   <TableCell>Status</TableCell>
@@ -1031,15 +1050,39 @@ function ProductsPage({ setSnack }) {
                     <TableCell>{p.id}</TableCell>
                     <TableCell>{p.name ?? p.title}</TableCell>
                     <TableCell>{p.first_detail?.price ? Number(p.first_detail.price).toLocaleString("vi-VN")+"₫" : "—"}</TableCell>
+
+                    {/* Quantity column: show numeric value when possible */}
+                    <TableCell>
+                      {(() => {
+                        const qty = (p.first_detail && typeof p.first_detail.quantity === 'number') ? p.first_detail.quantity
+                                  : (p.quantity !== undefined && p.quantity !== null ? p.quantity : null);
+                        if (qty === null) return "—";
+                        return Number(qty).toLocaleString("en-US");
+                      })()}
+                    </TableCell>
+
                     <TableCell>{p.slug ?? "-"}</TableCell>
                     <TableCell>{p.description ?? "-"}</TableCell>
+
+                    {/* Status column: derive from quantity (first_detail preferred) */}
                     <TableCell>
-                      {(p.status === 1 || p.status === "1" || p.status === true) ? (
-                        <Typography variant="body2" component="span" color="success.main">Còn hàng</Typography>
-                      ) : (
-                        <Typography variant="body2" component="span" color="text.secondary">Hết hàng</Typography>
-                      )}
+                      {(() => {
+                        const qty = (p.first_detail && typeof p.first_detail.quantity === 'number') ? p.first_detail.quantity
+                                  : (p.quantity !== undefined && p.quantity !== null ? p.quantity : null);
+                        if (qty === null) {
+                          // fallback to product.status if quantity unknown
+                          if (p.status === 1 || p.status === "1" || p.status === true) {
+                            return <Typography variant="body2" component="span" color="success.main">Còn hàng</Typography>;
+                          } else {
+                            return <Typography variant="body2" component="span" color="text.secondary">Hết hàng</Typography>;
+                          }
+                        }
+                        return Number(qty) > 0
+                          ? <Typography variant="body2" component="span" color="success.main">Còn hàng</Typography>
+                          : <Typography variant="body2" component="span" color="text.secondary">Hết hàng</Typography>;
+                      })()}
                     </TableCell>
+
                     <TableCell>{p.categories_id ?? (p.category?.name ?? "-")}</TableCell>
                     <TableCell>{ p.first_detail?.color?.name ?? "—" }</TableCell>
                     <TableCell>{ p.first_detail?.size?.name ?? "—" }</TableCell>
@@ -1128,6 +1171,13 @@ function ProductEditDialog({ open, onClose, item, onSave, categories = [], color
       if (payload.colors_id === "" || payload.colors_id === null) payload.colors_id = null;
       if (payload.sizes_id === "" || payload.sizes_id === null) payload.sizes_id = null;
 
+      // ensure description exists (backend may require)
+      if (payload.description === undefined || payload.description === null) payload.description = "";
+
+      // ensure quantity is numeric (could be 0)
+      if (payload.quantity === undefined || payload.quantity === null) payload.quantity = 0;
+      else payload.quantity = Number(payload.quantity);
+
       await onSave(payload, files);
     } finally {
       setSaving(false);
@@ -1142,7 +1192,7 @@ function ProductEditDialog({ open, onClose, item, onSave, categories = [], color
         <TextField label="Price" fullWidth value={form.price ?? ""} onChange={(e)=> setForm({...form, price: e.target.value})} sx={{ mt:1 }} />
         <TextField label="Description" fullWidth multiline minRows={3} value={form.description ?? ""} onChange={(e)=> setForm({...form, description: e.target.value})} sx={{ mt:1 }} />
 
-        {/* Status select: 1 = Còn hàng, 0 = Hết hàng */}
+        {/* Status select (kept for manual override) */}
         <TextField
           select
           label="Status"
@@ -1150,7 +1200,7 @@ function ProductEditDialog({ open, onClose, item, onSave, categories = [], color
           value={String(form.status ?? "1")}
           onChange={(e) => setForm({ ...form, status: e.target.value })}
           sx={{ mt: 1 }}
-          helperText="1 = Còn hàng, 0 = Hết hàng"
+          helperText="1 = Còn hàng, 0 = Hết hàng (lưu ý: hệ thống sẽ ưu tiên quantity của detail để hiện thị status)"
         >
           <MenuItem value={"1"}>Còn hàng</MenuItem>
           <MenuItem value={"0"}>Hết hàng</MenuItem>
@@ -1210,6 +1260,17 @@ function ProductEditDialog({ open, onClose, item, onSave, categories = [], color
           ))}
         </TextField>
 
+        {/* Quantity field: numeric input (important - status displayed from this) */}
+        <TextField
+          label="Quantity (for first detail)"
+          fullWidth
+          type="number"
+          value={form.quantity ?? 0}
+          onChange={(e) => setForm({ ...form, quantity: Number(e.target.value) })}
+          sx={{ mt: 1 }}
+          helperText="Số lượng sẽ quyết định hiển thị Status (Còn/Hết hàng) sau khi lưu"
+        />
+
         <Box sx={{ mt:2 }}>
           <Typography variant="subtitle2">Images</Typography>
           <input type="file" accept="image/*" multiple onChange={handleFilesChange} style={{ marginTop: 8 }} />
@@ -1234,6 +1295,7 @@ function ProductEditDialog({ open, onClose, item, onSave, categories = [], color
     </Dialog>
   );
 }
+
 
 
 /* ---------------------- Orders ---------------------- */
@@ -1624,18 +1686,23 @@ function ReturnsPage({ setSnack }) {
 }
 
 /* ---------------------- Stock Entries ---------------------- */
+/* ---------------------- Stock Entries (upgraded) ---------------------- */
 function StockPage({ setSnack }) {
-  const [entries, setEntries] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [openCreate, setOpenCreate] = useState(false);
+  const [entries, setEntries] = React.useState([]);
+  const [loading, setLoading] = React.useState(false);
+  const [openCreate, setOpenCreate] = React.useState(false);
 
-  const [suppliers, setSuppliers] = useState([]);
-  const [productDetails, setProductDetails] = useState([]);
-  const [optsLoading, setOptsLoading] = useState(false);
+  const [suppliers, setSuppliers] = React.useState([]);
+  const [productDetails, setProductDetails] = React.useState([]);
+  const [optsLoading, setOptsLoading] = React.useState(false);
 
-  // form supports either selecting an existing supplier (suppliers_id)
-  // or entering supplier_manual (name/email/address/phone)
-  const [form, setForm] = useState({
+  // supplier quick-create modal state
+  const [openSupplierModal, setOpenSupplierModal] = React.useState(false);
+  const [supplierForm, setSupplierForm] = React.useState({ name: "", email: "", phone: "", address: "" });
+  const [supplierCreating, setSupplierCreating] = React.useState(false);
+
+  // main create-receipt form
+  const [form, setForm] = React.useState({
     suppliers_id: "",
     supplier_manual: { name: "", email: "", address: "", phone: "" },
     note: "",
@@ -1643,7 +1710,8 @@ function StockPage({ setSnack }) {
     items: [{ product_detail_id: "", qty: 1, price: 0 }],
   });
 
-  // safe token getter (handles stringified token cases)
+  const [viewReceipt, setViewReceipt] = React.useState(null); // for dialog view
+
   const getStoredToken = () => {
     let token = localStorage.getItem("access_token") || localStorage.getItem("token") || null;
     if (!token) return null;
@@ -1654,21 +1722,18 @@ function StockPage({ setSnack }) {
     return String(token).trim();
   };
 
-  // fetch receipts (admin route)
-  const fetchStock = useCallback(async () => {
+  // fetch receipts
+  const fetchStock = React.useCallback(async () => {
     setLoading(true);
     try {
       const token = getStoredToken();
       const res = await fetch(`${API_BASE}/api/admin/receipts`, {
         method: "GET",
-        headers: {
-          "Accept": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { Accept: "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       });
-      if (!res.ok) throw new Error("stock fetch failed");
+      if (!res.ok) throw new Error("fetch receipts failed");
       const data = await res.json();
-      const arr = Array.isArray(data) ? data : (data.data ?? data.items ?? []);
+      const arr = Array.isArray(data) ? data : data.data ?? data.items ?? [];
       setEntries(arr);
     } catch (err) {
       console.error(err);
@@ -1679,20 +1744,20 @@ function StockPage({ setSnack }) {
     }
   }, [setSnack]);
 
-  // fetch suppliers and product details for selects
-  const fetchOptions = useCallback(async () => {
+  // fetch suppliers & product-details
+  const fetchOptions = React.useCallback(async () => {
     setOptsLoading(true);
     try {
       const token = getStoredToken();
       const [sRes, pdRes] = await Promise.all([
         fetch(`${API_BASE}/api/admin/suppliers`, { headers: { Accept: "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) } }),
-        fetch(`${API_BASE}/api/product-details`, { headers: { Accept: "application/json" } }),
+        fetch(`${API_BASE}/api/product-details?with=color,size,product`, { headers: { Accept: "application/json" } }),
       ]);
 
       const sData = sRes.ok ? await sRes.json().catch(() => []) : [];
       const pdData = pdRes.ok ? await pdRes.json().catch(() => []) : [];
 
-      const normalize = (d) => Array.isArray(d) ? d : (d.data ?? d.items ?? []);
+      const normalize = (d) => (Array.isArray(d) ? d : (d.data ?? d.items ?? []));
       setSuppliers(normalize(sData));
       setProductDetails(normalize(pdData));
     } catch (err) {
@@ -1704,64 +1769,75 @@ function StockPage({ setSnack }) {
     }
   }, [setSnack]);
 
-  useEffect(() => { fetchStock(); fetchOptions(); }, [fetchStock, fetchOptions]);
+  React.useEffect(() => { fetchStock(); fetchOptions(); }, [fetchStock, fetchOptions]);
 
-  // UI helpers: items management
-  const addItemRow = () => {
+  /** items helpers **/
+  const addItemRow = React.useCallback(() => {
     setForm(f => ({ ...f, items: [...f.items, { product_detail_id: "", qty: 1, price: 0 }] }));
-  };
-  const removeItemRow = (idx) => {
+  }, []);
+  const removeItemRow = React.useCallback((idx) => {
     setForm(f => ({ ...f, items: f.items.filter((_, i) => i !== idx) }));
-  };
-  const updateItem = (idx, field, value) => {
+  }, []);
+  const updateItem = React.useCallback((idx, field, value) => {
     setForm(f => {
-      const items = f.items.map((it, i) => i === idx ? ({ ...it, [field]: value }) : it);
+      const items = f.items.map((it, i) => {
+        if (i !== idx) return it;
+        if (field === "qty") {
+          const n = Number(value);
+          return { ...it, qty: Number.isNaN(n) ? 0 : n };
+        }
+        if (field === "price") {
+          const n = Number(value);
+          return { ...it, price: Number.isNaN(n) ? 0 : n };
+        }
+        return { ...it, [field]: value };
+      });
       return { ...f, items };
     });
-  };
+  }, []);
 
-  // create supplier (used when user types supplier manually)
-  const createSupplier = async (supplierData) => {
-    const token = getStoredToken();
+  const findDetail = React.useCallback((id) => {
+    if (!id) return null;
+    return productDetails.find(d => String(d.id) === String(id)) || null;
+  }, [productDetails]);
+
+  const formatCurrency = (v) => {
+    const n = Number(v) || 0;
+    return n.toLocaleString("vi-VN") + "₫";
+  };
+  const computeLineTotal = (item) => (Number(item.qty) || 0) * (Number(item.price) || 0);
+  const computeGrandTotal = React.useMemo(() => form.items.reduce((acc, it) => acc + computeLineTotal(it), 0), [form.items]);
+
+  const extractErrorMessage = async (res) => {
     try {
-      const res = await fetch(`${API_BASE}/api/admin/suppliers`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify(supplierData),
-      });
-      if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        console.error("create supplier failed:", res.status, txt);
-        throw new Error(txt || "Create supplier failed");
+      const j = await res.json();
+      if (j && (j.message || j.error || j.errors)) {
+        if (typeof j.message === "string") return j.message;
+        if (typeof j.error === "string") return j.error;
+        if (j.errors) {
+          if (typeof j.errors === "string") return j.errors;
+          if (typeof j.errors === "object") return JSON.stringify(j.errors);
+        }
+        return JSON.stringify(j);
       }
-      const created = await res.json();
-      return created.id ?? created.id; // expect id returned
-    } catch (err) {
-      console.error(err);
-      throw err;
-    }
+    } catch (e) {}
+    try {
+      const txt = await res.text();
+      if (txt) return txt;
+    } catch (e) {}
+    return "Có lỗi xảy ra";
   };
 
-  // create receipt: if suppliers_id empty but manual supplier provided, create supplier first
-  const handleCreate = async () => {
-    const token = getStoredToken();
-
-    // validate supplier presence (either selected or manual name)
-    const manual = form.supplier_manual || {};
-    const hasManual = manual.name && String(manual.name).trim() !== "";
-    if (!form.suppliers_id && !hasManual) {
-      setSnack({ severity: "error", message: "Vui lòng chọn supplier hoặc nhập supplier mới" });
+  /** handle create receipt **/
+  const [creatingReceipt, setCreatingReceipt] = React.useState(false);
+  const handleCreate = React.useCallback(async () => {
+    if (!form.suppliers_id) {
+      setSnack({ severity: "error", message: "Vui lòng chọn supplier (hoặc tạo supplier bằng nút 'Tạo supplier') trước khi tạo phiếu." });
       return;
     }
 
-    // validate items
     if (!Array.isArray(form.items) || form.items.length === 0) {
-      setSnack({ severity: "error", message: "Thêm ít nhất 1 item" });
-      return;
+      setSnack({ severity: "error", message: "Thêm ít nhất 1 item" }); return;
     }
     for (const it of form.items) {
       if (!it.product_detail_id) { setSnack({ severity: "error", message: "Chọn product detail cho tất cả item" }); return; }
@@ -1769,31 +1845,12 @@ function StockPage({ setSnack }) {
       if (it.price === "" || Number(it.price) < 0) { setSnack({ severity: "error", message: "Price không hợp lệ" }); return; }
     }
 
+    if (creatingReceipt) return;
+    setCreatingReceipt(true);
     try {
-      setLoading(true);
-
-      let supplierId = form.suppliers_id;
-      if (!supplierId && hasManual) {
-        // build supplier payload (only include provided fields)
-        const payloadSupplier = {
-          name: manual.name,
-          email: manual.email || "",
-          address: manual.address || "",
-          phone: manual.phone || "",
-        };
-        try {
-          supplierId = await createSupplier(payloadSupplier);
-          // refresh suppliers list so select shows new supplier if needed later
-          fetchOptions();
-        } catch (err) {
-          setSnack({ severity: "error", message: "Tạo supplier thất bại" });
-          return;
-        }
-      }
-
-      // now create receipt
+      const token = getStoredToken();
       const payload = {
-        suppliers_id: supplierId,
+        suppliers_id: form.suppliers_id,
         note: form.note || "",
         import_date: form.import_date || new Date().toISOString().slice(0, 10),
         items: form.items.map(it => ({
@@ -1805,24 +1862,17 @@ function StockPage({ setSnack }) {
 
       const res = await fetch(`${API_BASE}/api/admin/receipts`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { "Content-Type": "application/json", Accept: "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify(payload),
       });
 
       if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        console.error("create receipt failed:", res.status, txt);
-        let errMsg = "Tạo phiếu nhập thất bại";
-        try { const j = JSON.parse(txt || "{}"); errMsg = j.message || txt || errMsg; } catch {}
-        setSnack({ severity: "error", message: errMsg });
+        const msg = await extractErrorMessage(res);
+        setSnack({ severity: "error", message: msg || "Tạo phiếu nhập thất bại" });
         return;
       }
 
-      await res.json();
+      const created = await res.json();
       setSnack({ severity: "success", message: "Tạo phiếu nhập thành công" });
       setOpenCreate(false);
       // reset form
@@ -1833,181 +1883,334 @@ function StockPage({ setSnack }) {
         import_date: new Date().toISOString().slice(0, 10),
         items: [{ product_detail_id: "", qty: 1, price: 0 }],
       });
-      fetchStock();
+      // refresh receipts & product details (to show updated stock)
+      await fetchStock();
+      await fetchOptions();
     } catch (err) {
-      console.error(err);
+      console.error("handleCreate error", err);
       setSnack({ severity: "error", message: "Tạo thất bại" });
     } finally {
-      setLoading(false);
+      setCreatingReceipt(false);
+    }
+  }, [form, creatingReceipt, fetchStock, fetchOptions, setSnack]);
+
+  /** Supplier quick-create **/
+  const openSupplierCreate = () => {
+    setSupplierForm({ name: "", email: "", phone: "", address: "" });
+    setOpenSupplierModal(true);
+  };
+
+  const handleCreateSupplier = async () => {
+    if (!supplierForm.name || supplierForm.name.trim() === "") {
+      setSnack({ severity: "error", message: "Tên supplier là bắt buộc" });
+      return;
+    }
+    setSupplierCreating(true);
+    try {
+      const token = getStoredToken();
+      const res = await fetch(`${API_BASE}/api/admin/suppliers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify(supplierForm),
+      });
+      if (!res.ok) {
+        const msg = await extractErrorMessage(res);
+        setSnack({ severity: "error", message: msg || "Tạo supplier thất bại" });
+        return;
+      }
+      const created = await res.json();
+      setSnack({ severity: "success", message: "Tạo supplier thành công" });
+      await fetchOptions();
+      setForm(f => ({ ...f, suppliers_id: created.id ?? created.ID ?? created.data?.id ?? created.id }));
+      setOpenSupplierModal(false);
+    } catch (err) {
+      console.error("create supplier error", err);
+      setSnack({ severity: "error", message: "Tạo supplier thất bại" });
+    } finally {
+      setSupplierCreating(false);
     }
   };
 
-  // render
+  /** Product detail preview **/
+  const ProductDetailPreview = ({ detail }) => {
+    if (!detail) return React.createElement("div", { style: { color: "#6b7280" } }, "Chưa chọn sản phẩm");
+    return React.createElement("div", null,
+      React.createElement("div", { style: { fontWeight: 600 } }, detail.product?.name ?? `#${detail.id}`),
+      React.createElement("div", { style: { color: "#6b7280", fontSize: 13 } }, `Màu: ${detail.color?.name ?? "—"}`),
+      React.createElement("div", { style: { color: "#6b7280", fontSize: 13 } }, `Size: ${detail.size?.name ?? "—"}`),
+      React.createElement("div", { style: { color: "#6b7280", fontSize: 13 } }, `Giá bán (site): ${detail.price ? formatCurrency(detail.price) : "—"}`),
+      React.createElement("div", { style: { color: "#6b7280", fontSize: 13 } }, `Tồn kho: ${detail.quantity ?? "—"}`)
+    );
+  };
+
+  /** Render UI **/
   return (
-    <Box>
-      <Stack direction="row" justifyContent="space-between" sx={{ mb: 2 }}>
-        <Typography variant="h6">Stock Entries (Receipts)</Typography>
-        <Button onClick={() => setOpenCreate(true)} variant="contained">Create Receipt</Button>
-      </Stack>
+    React.createElement(Box, null,
+      React.createElement(Stack, { direction: "row", justifyContent: "space-between", sx: { mb: 2 } },
+        React.createElement(Typography, { variant: "h6" }, "Stock Entries (Receipts)"),
+        React.createElement(Stack, { direction: "row", spacing: 1 },
+          React.createElement(Button, { variant: "outlined", onClick: openSupplierCreate }, "Tạo supplier"),
+          React.createElement(Button, { onClick: () => setOpenCreate(true), variant: "contained" }, "Create Receipt")
+        )
+      ),
 
-      <Paper>
-        {loading ? (
-          <Box sx={{ p: 3, display: "flex", justifyContent: "center" }}><CircularProgress /></Box>
-        ) : (
-          <TableContainer>
-            <Table>
-              <TableHead>
-                <TableRow>
-                  <TableCell>#</TableCell>
-                  <TableCell>Supplier</TableCell>
-                  <TableCell>Import date</TableCell>
-                  <TableCell>Total</TableCell>
-                  <TableCell>Note</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {entries.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={5} align="center" sx={{ py: 6 }}>Không có phiếu nhập</TableCell>
-                  </TableRow>
-                ) : entries.map(e => (
-                  <TableRow key={e.id}>
-                    <TableCell>{e.id}</TableCell>
-                    <TableCell>{e.supplier?.name ?? (e.suppliers_id ?? "—")}</TableCell>
-                    <TableCell>{e.import_date ?? e.created_at ?? "—"}</TableCell>
-                    <TableCell>{e.total_price ? Number(e.total_price).toLocaleString("vi-VN") + "₫" : "—"}</TableCell>
-                    <TableCell>{e.note ?? "—"}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </TableContainer>
-        )}
-      </Paper>
+      React.createElement(Paper, null,
+        loading ? React.createElement(Box, { sx: { p: 3, display: "flex", justifyContent: "center" } }, React.createElement(CircularProgress, null))
+        : React.createElement(TableContainer, null,
+          React.createElement(Table, null,
+            React.createElement(TableHead, null,
+              React.createElement(TableRow, null,
+                React.createElement(TableCell, null, "#"),
+                React.createElement(TableCell, null, "Supplier"),
+                React.createElement(TableCell, null, "Import date"),
+                React.createElement(TableCell, null, "Total"),
+                React.createElement(TableCell, null, "Actions")
+              )
+            ),
+            React.createElement(TableBody, null,
+              entries.length === 0 ? React.createElement(TableRow, null,
+                React.createElement(TableCell, { colSpan: 5, align: "center", sx: { py: 6 } }, "Không có phiếu nhập")
+              ) : entries.map(e => React.createElement(TableRow, { key: e.id },
+                React.createElement(TableCell, null, e.id),
+                React.createElement(TableCell, null, e.supplier?.name ?? (e.suppliers_id ?? "—")),
+                React.createElement(TableCell, null, e.import_date ?? e.created_at ?? "—"),
+                React.createElement(TableCell, null, e.total_price ? Number(e.total_price).toLocaleString("vi-VN") + "₫" : "—"),
+                React.createElement(TableCell, null,
+                  React.createElement(Button, { size: "small", onClick: () => setViewReceipt(e) }, "View"),
+                  React.createElement(Button, { size: "small", color: "error", onClick: async () => {
+                    if (!window.confirm("Xóa phiếu nhập? Hành động có thể không rollback tồn kho.")) return;
+                    try {
+                      const token = getStoredToken();
+                      const res = await fetch(`${API_BASE}/api/admin/receipts/${e.id}`, { method: "DELETE", headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) } });
+                      if (!res.ok) throw new Error("Delete failed");
+                      setSnack({ severity: "success", message: "Đã xóa phiếu" });
+                      fetchStock();
+                      await fetchOptions();
+                    } catch (err) {
+                      console.error(err);
+                      setSnack({ severity: "error", message: "Xóa thất bại" });
+                    }
+                  } }, "Delete")
+                )
+              ))
+            )
+          )
+        )
+      ),
 
-      <Dialog open={openCreate} onClose={() => setOpenCreate(false)} maxWidth="md" fullWidth>
-        <DialogTitle>Create receipt</DialogTitle>
-        <DialogContent>
-          <Stack spacing={2} sx={{ mt: 1 }}>
-            {/* Choose existing supplier OR enter manually */}
-            <TextField
-              select
-              label="Select existing supplier (optional)"
-              fullWidth
-              value={form.suppliers_id}
-              onChange={(e) => setForm({ ...form, suppliers_id: e.target.value })}
-              helperText={optsLoading ? "Loading suppliers..." : "Bạn có thể chọn supplier có sẵn hoặc nhập tay bên dưới"}
-            >
-              <MenuItem value="">-- none / use manual input --</MenuItem>
-              {suppliers.map(s => (
-                <MenuItem key={s.id} value={s.id}>{s.name}</MenuItem>
-              ))}
-            </TextField>
+      // Receipt create dialog (same layout as you had)
+      React.createElement(Dialog, { open: openCreate, onClose: () => setOpenCreate(false), maxWidth: "md", fullWidth: true },
+        React.createElement(DialogTitle, null, "Create receipt"),
+        React.createElement(DialogContent, null,
+          React.createElement(Stack, { spacing: 2, sx: { mt: 1 } },
 
-            <Typography variant="body2" color="text.secondary">Or enter supplier manually:</Typography>
-            <Stack direction="row" spacing={1}>
-              <TextField
-                label="Supplier name"
-                fullWidth
-                value={form.supplier_manual.name}
-                onChange={(e) => setForm({ ...form, supplier_manual: { ...form.supplier_manual, name: e.target.value } })}
-              />
-              <TextField
-                label="Phone"
-                sx={{ width: 200 }}
-                value={form.supplier_manual.phone}
-                onChange={(e) => setForm({ ...form, supplier_manual: { ...form.supplier_manual, phone: e.target.value } })}
-              />
-            </Stack>
-            <TextField
-              label="Email"
-              fullWidth
-              value={form.supplier_manual.email}
-              onChange={(e) => setForm({ ...form, supplier_manual: { ...form.supplier_manual, email: e.target.value } })}
-            />
-            <TextField
-              label="Address"
-              fullWidth
-              value={form.supplier_manual.address}
-              onChange={(e) => setForm({ ...form, supplier_manual: { ...form.supplier_manual, address: e.target.value } })}
-            />
+            React.createElement(TextField, {
+              select: true,
+              label: "Select existing supplier (required)",
+              fullWidth: true,
+              value: form.suppliers_id,
+              onChange: (e) => setForm({ ...form, suppliers_id: e.target.value }),
+              helperText: optsLoading ? "Loading suppliers..." : "Chọn supplier có sẵn hoặc tạo mới bằng nút 'Tạo supplier'"
+            },
+              React.createElement(MenuItem, { value: "" }, "-- none --"),
+              suppliers.map(s => React.createElement(MenuItem, { key: s.id, value: s.id }, s.name))
+            ),
 
-            <TextField
-              label="Import date"
-              type="date"
-              fullWidth
-              value={form.import_date}
-              onChange={(e) => setForm({ ...form, import_date: e.target.value })}
-              InputLabelProps={{ shrink: true }}
-            />
+            React.createElement(TextField, {
+              label: "Supplier (manual note, won't auto-create)",
+              fullWidth: true,
+              value: form.supplier_manual.name,
+              onChange: (e) => setForm({ ...form, supplier_manual: { ...form.supplier_manual, name: e.target.value } }),
+              helperText: "Bạn có thể nhập tạm tên supplier nhưng cần tạo supplier qua nút 'Tạo supplier' nếu muốn lưu chính thức."
+            }),
 
-            <TextField
-              label="Note"
-              fullWidth
-              multiline
-              minRows={2}
-              value={form.note}
-              onChange={(e) => setForm({ ...form, note: e.target.value })}
-            />
+            React.createElement(TextField, {
+              label: "Import date",
+              type: "date",
+              fullWidth: true,
+              value: form.import_date,
+              onChange: (e) => setForm({ ...form, import_date: e.target.value }),
+              InputLabelProps: { shrink: true }
+            }),
 
-            <Box>
-              <Typography variant="subtitle2" sx={{ mb: 1 }}>Items</Typography>
-              <Stack spacing={1}>
-                {form.items.map((it, idx) => (
-                  <Paper key={idx} sx={{ p: 1, display: "flex", gap: 1, alignItems: "center" }}>
-                    <TextField
-                      select
-                      label="Product detail"
-                      value={it.product_detail_id}
-                      onChange={(e) => updateItem(idx, 'product_detail_id', e.target.value)}
-                      sx={{ minWidth: 240 }}
-                    >
-                      <MenuItem value="">-- select --</MenuItem>
-                      {productDetails.map(pd => (
-                        <MenuItem key={pd.id} value={pd.id}>
-                          {pd.product?.name ? `${pd.product.name} #${pd.id}` : `#${pd.id}`}
-                        </MenuItem>
-                      ))}
-                    </TextField>
+            React.createElement(TextField, {
+              label: "Note",
+              fullWidth: true,
+              multiline: true,
+              minRows: 2,
+              value: form.note,
+              onChange: (e) => setForm({ ...form, note: e.target.value })
+            }),
 
-                    <TextField
-                      label="Qty"
-                      type="number"
-                      value={it.qty}
-                      onChange={(e) => updateItem(idx, 'qty', e.target.value)}
-                      sx={{ width: 120 }}
-                    />
+            // Items list
+            React.createElement(Box, null,
+              React.createElement(Typography, { variant: "subtitle2", sx: { mb: 1 } }, "Items"),
+              React.createElement(Stack, { spacing: 1 },
+                form.items.map((it, idx) => {
+                  const detail = findDetail(it.product_detail_id);
+                  return React.createElement(Paper, { key: idx, sx: { p: 1 } },
+                    React.createElement(Stack, { spacing: 1 },
+                      React.createElement(TextField, {
+                        select: true,
+                        label: "Product Detail",
+                        value: it.product_detail_id,
+                        onChange: (e) => {
+                          const id = e.target.value;
+                          updateItem(idx, "product_detail_id", id);
+                          const d = findDetail(id);
+                          if (d && (!it.price || it.price === 0)) updateItem(idx, "price", Number(d.price || 0));
+                        }
+                      },
+                        React.createElement(MenuItem, { value: "" }, "-- chọn --"),
+                        productDetails.map(pd => React.createElement(MenuItem, { key: pd.id, value: pd.id },
+                          `${pd.product?.name ?? `#${pd.id}`} — ${pd.color?.name ?? "—"} — ${pd.size?.name ?? "—"} — ${Number(pd.price || 0).toLocaleString("vi-VN")}₫`
+                        ))
+                      ),
 
-                    <TextField
-                      label="Price"
-                      type="number"
-                      value={it.price}
-                      onChange={(e) => updateItem(idx, 'price', e.target.value)}
-                      sx={{ width: 160 }}
-                      helperText="Price per unit"
-                    />
+                      React.createElement(Box, { sx: { p: 1, border: "1px solid #eee", borderRadius: 1 } },
+                        React.createElement(ProductDetailPreview, { detail })
+                      ),
 
-                    <Box sx={{ ml: 'auto' }}>
-                      <Button size="small" color="error" onClick={() => removeItemRow(idx)} disabled={form.items.length === 1}>Remove</Button>
-                    </Box>
-                  </Paper>
-                ))}
-              </Stack>
+                      React.createElement(Stack, { direction: "row", spacing: 2, alignItems: "center" },
+                        React.createElement(TextField, {
+                          label: "Qty",
+                          type: "number",
+                          value: it.qty,
+                          onChange: (e) => updateItem(idx, "qty", e.target.value),
+                          sx: { width: 120 }
+                        }),
+                        React.createElement(TextField, {
+                          label: "Purchase price (VNĐ)",
+                          type: "number",
+                          value: it.price,
+                          onChange: (e) => updateItem(idx, "price", e.target.value),
+                          sx: { width: 180 },
+                          helperText: "Giá nhập lưu trong phiếu (không cập nhật giá bán)"
+                        }),
+                        React.createElement("div", null,
+                          React.createElement(Typography, { variant: "body2" }, "Thành tiền"),
+                          React.createElement(Typography, { variant: "subtitle2" }, formatCurrency(computeLineTotal(it)))
+                        ),
+                        React.createElement(Box, { sx: { ml: "auto" } },
+                          React.createElement(Button, { size: "small", color: "error", onClick: () => removeItemRow(idx), disabled: form.items.length === 1 }, "Remove")
+                        )
+                      )
+                    )
+                  );
+                })
+              ),
+              React.createElement(Box, { sx: { mt: 1 } },
+                React.createElement(Button, { onClick: addItemRow }, "Add item")
+              ),
 
-              <Box sx={{ mt: 1 }}>
-                <Button onClick={addItemRow}>Add item</Button>
-              </Box>
-            </Box>
-          </Stack>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setOpenCreate(false)}>Cancel</Button>
-          <Button variant="contained" onClick={handleCreate}>Create</Button>
-        </DialogActions>
-      </Dialog>
-    </Box>
+              React.createElement(Box, { sx: { mt: 2, textAlign: "right" } },
+                React.createElement(Typography, { variant: "subtitle2" }, "Tổng tạm tính: " + formatCurrency(computeGrandTotal))
+              )
+            )
+          )
+        ),
+        React.createElement(DialogActions, null,
+          React.createElement(Button, { onClick: () => setOpenCreate(false) }, "Cancel"),
+          React.createElement(Button, { variant: "contained", onClick: handleCreate, disabled: creatingReceipt },
+            creatingReceipt ? "Đang tạo..." : "Create"
+          )
+        )
+      ),
+
+      // View receipt dialog (shows each receipt item + purchase price)
+      React.createElement(Dialog, { open: !!viewReceipt, onClose: () => setViewReceipt(null), maxWidth: "md", fullWidth: true },
+        React.createElement(DialogTitle, null, viewReceipt ? `Receipt #${viewReceipt.id}` : "Receipt"),
+        React.createElement(DialogContent, null,
+          viewReceipt ? React.createElement(Box, null,
+            React.createElement(Typography, null, `Supplier: ${viewReceipt.supplier?.name ?? viewReceipt.suppliers_id ?? "-"}`),
+            React.createElement(Typography, null, `Import date: ${viewReceipt.import_date ?? viewReceipt.created_at ?? "-"}`),
+            React.createElement(Box, { sx: { mt: 2 } },
+              React.createElement(TableContainer, null,
+                React.createElement(Table, null,
+                  React.createElement(TableHead, null,
+                    React.createElement(TableRow, null,
+                      React.createElement(TableCell, null, "Product"),
+                      React.createElement(TableCell, null, "Color"),
+                      React.createElement(TableCell, null, "Size"),
+                      React.createElement(TableCell, null, "Qty"),
+                      React.createElement(TableCell, null, "Purchase price"),
+                      React.createElement(TableCell, null, "Subtotal")
+                    )
+                  ),
+                  React.createElement(TableBody, null,
+                    (viewReceipt.details || []).map(d => React.createElement(TableRow, { key: d.id || `${d.product_detail_id}_${Math.random()}` },
+                      React.createElement(TableCell, null, d.product_detail?.product?.name ?? `#${d.product_detail_id}`),
+                      React.createElement(TableCell, null, d.product_detail?.color?.name ?? "—"),
+                      React.createElement(TableCell, null, d.product_detail?.size?.name ?? "—"),
+                      React.createElement(TableCell, null, d.quantity),
+                      React.createElement(TableCell, null, d.price ? Number(d.price).toLocaleString("vi-VN") + "₫" : "—"),
+                      React.createElement(TableCell, null, d.subtotal ? Number(d.subtotal).toLocaleString("vi-VN") + "₫" : (d.quantity && d.price ? Number(d.quantity * d.price).toLocaleString("vi-VN") + "₫" : "—"))
+                    ))
+                  )
+                )
+              )
+            )
+          ) : null
+        ),
+        React.createElement(DialogActions, null,
+          React.createElement(Button, { onClick: () => setViewReceipt(null) }, "Close")
+        )
+      ),
+
+      // Supplier Quick Create Modal
+      React.createElement(Dialog, { open: openSupplierModal, onClose: () => setOpenSupplierModal(false), maxWidth: "sm", fullWidth: true },
+        React.createElement(DialogTitle, null, "Create Supplier (Quick)"),
+        React.createElement(DialogContent, null,
+          React.createElement(Stack, { spacing: 2, sx: { mt: 1 } },
+            React.createElement(TextField, {
+              label: "Name",
+              fullWidth: true,
+              value: supplierForm.name,
+              onChange: (e) => setSupplierForm({ ...supplierForm, name: e.target.value })
+            }),
+            React.createElement(TextField, {
+              label: "Phone",
+              fullWidth: true,
+              value: supplierForm.phone,
+              inputProps: { maxLength: 10 },
+              onChange: (e) => {
+                const v = e.target.value;
+                if (!/^\d*$/.test(v)) return;
+                setSupplierForm({ ...supplierForm, phone: v });
+              },
+              error: supplierForm.phone.length > 0 && supplierForm.phone.length !== 10,
+              helperText: supplierForm.phone.length > 0 && supplierForm.phone.length !== 10 ? "Số điện thoại phải đúng 10 số" : ""
+            }),
+            React.createElement(TextField, {
+              label: "Email",
+              fullWidth: true,
+              value: supplierForm.email,
+              onChange: (e) => setSupplierForm({ ...supplierForm, email: e.target.value })
+            }),
+            React.createElement(TextField, {
+              label: "Address",
+              fullWidth: true,
+              value: supplierForm.address,
+              onChange: (e) => setSupplierForm({ ...supplierForm, address: e.target.value })
+            }),
+            React.createElement(Typography, { variant: "caption", color: "text.secondary" }, "Supplier sẽ được tạo và tự động chọn cho form tạo phiếu.")
+          )
+        ),
+        React.createElement(DialogActions, null,
+          React.createElement(Button, { onClick: () => setOpenSupplierModal(false) }, "Cancel"),
+          React.createElement(Button, { variant: "contained", onClick: handleCreateSupplier, disabled: supplierCreating },
+            supplierCreating ? "Đang tạo..." : "Create supplier"
+          )
+        )
+      )
+    )
   );
 }
+
+/* ---------------------- Inventory Logs ---------------------- */
+
+
+
 
 
 /* ---------------------- Comments ---------------------- */
