@@ -1295,9 +1295,6 @@ function ProductEditDialog({ open, onClose, item, onSave, categories = [], color
     </Dialog>
   );
 }
-
-
-
 /* ---------------------- Orders ---------------------- */
 function OrdersPage({ setSnack }) {
   const [orders, setOrders] = useState([]);
