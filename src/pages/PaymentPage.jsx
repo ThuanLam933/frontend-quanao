@@ -77,6 +77,24 @@ export default function PaymentPage() {
   // shipping fee (fixed for demo, you can compute dynamically)
   const SHIPPING_FEE = 30000;
 
+  // helper: mask card number for logs, avoid storing sensitive data
+  const maskCardNumber = (num) => {
+    if (!num) return null;
+    const s = String(num).replace(/\s+/g, "");
+    if (s.length <= 4) return "*".repeat(s.length);
+    return "*".repeat(Math.max(0, s.length - 4)) + s.slice(-4);
+  };
+
+  // helper: append error logs to localStorage (keep last 50)
+  const appendErrorLog = (entry) => {
+    try {
+      const raw = localStorage.getItem("payment_error_logs") || "[]";
+      const arr = JSON.parse(raw);
+      arr.push({ time: new Date().toISOString(), ...entry });
+      localStorage.setItem("payment_error_logs", JSON.stringify(arr.slice(-50)));
+    } catch {}
+  };
+
   const subtotal = useMemo(() => {
     return cart.reduce((s, it) => {
       const unit = it.unit_price != null ? Number(it.unit_price) : 0;
@@ -155,7 +173,15 @@ export default function PaymentPage() {
       },
     };
 
+    // create a redacted copy for logging (never store full card number/cvc)
+    const payloadMasked = JSON.parse(JSON.stringify(payload));
+    if (payloadMasked.payment && payloadMasked.payment.card) {
+      payloadMasked.payment.card.number = maskCardNumber(payloadMasked.payment.card.number);
+      payloadMasked.payment.card.cvc = payloadMasked.payment.card.cvc ? "***" : null;
+    }
+
     try {
+      console.debug("Placing order payload (masked):", payloadMasked);
       const token = localStorage.getItem("access_token");
       const headers = { "Content-Type": "application/json" };
       if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -173,6 +199,8 @@ export default function PaymentPage() {
 
       if (!res.ok) {
         const msg = (body && (body.message || JSON.stringify(body))) || `Tạo đơn thất bại (${res.status})`;
+        console.error("Order API error:", { status: res.status, body, payload: payloadMasked });
+        appendErrorLog({ type: "server", status: res.status, body: body || text, payload: payloadMasked });
         setSnack({ severity: "error", message: msg });
         setSubmitting(false);
         return;
@@ -180,6 +208,7 @@ export default function PaymentPage() {
 
       // success - backend may return created order id
       const order = (body && typeof body === "object" && (body.id || body.order_id || body.order)) ? (body.order || body) : body;
+      console.info("Order created:", { order, payload: payloadMasked });
       // clear cart
       try { localStorage.removeItem("cart"); } catch {}
       setCart([]);
@@ -192,7 +221,8 @@ export default function PaymentPage() {
         else navigate("/thank-you");
       }, 900);
     } catch (err) {
-      console.error("Place order error:", err);
+      console.error("Place order exception:", err, { payload: payloadMasked });
+      appendErrorLog({ type: "exception", error: err?.message || String(err), stack: err?.stack, payload: payloadMasked });
       setSnack({ severity: "error", message: "Lỗi khi tạo đơn. Vui lòng thử lại." });
     } finally {
       setSubmitting(false);

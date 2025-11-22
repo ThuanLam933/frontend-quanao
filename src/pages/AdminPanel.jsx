@@ -38,6 +38,9 @@ import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
 import VisibilityIcon from "@mui/icons-material/Visibility";
+import RefreshIcon from "@mui/icons-material/Refresh";
+import HistoryIcon from "@mui/icons-material/History";
+import Chip from "@mui/material/Chip";
 import { createTheme, ThemeProvider } from "@mui/material/styles";
 import { useNavigate } from "react-router-dom"; // <-- thêm useNavigate
 
@@ -67,6 +70,7 @@ const theme = createTheme({
 const SIDEBAR_ITEMS = [
   { key: "dashboard", title: "Dashboard" },
   { key: "products", title: "Products" },
+  {key: "inventory", title: "Inventory"},
   { key: "categories", title: "Categories" },
   { key: "colors", title: "Colors" },
   { key: "sizes", title: "Sizes" }, // <-- new
@@ -137,7 +141,7 @@ export default function AdminPanel() {
             {page === "dashboard" && <DashboardPage setSnack={setSnack} />}
 
             {page === "products" && <ProductsPage setSnack={setSnack} />}
-
+            {page === "inventory" && <InventoryPage setSnack={setSnack} />}
             {page === "categories" && <CategoriesPage setSnack={setSnack} />} {/* <-- render categories */}
             {page === "colors" && <ColorsPage setSnack={setSnack} />}
             {page === "sizes" && <SizesPage setSnack={setSnack} />}
@@ -1640,17 +1644,66 @@ function UsersPage({ setSnack }) {
 
 
 /* ---------------------- Returns ---------------------- */
+/* ---------------------- Returns (Improved) ---------------------- */
 function ReturnsPage({ setSnack }) {
-  const [items, setItems] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [items, setItems] = React.useState([]);
+  const [loading, setLoading] = React.useState(false);
+  const [openCreate, setOpenCreate] = React.useState(false);
+  const [sel, setSel] = React.useState(null); // selected return for view/edit
+  const [creating, setCreating] = React.useState(false);
+  const [updating, setUpdating] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
+  const [orders, setOrders] = React.useState([]);
+  const [productDetails, setProductDetails] = React.useState([]);
+  const [optsLoading, setOptsLoading] = React.useState(false);
 
-  const fetchReturns = useCallback(async () => {
+  const PAGE_SIZE = 12;
+  const [page, setPage] = React.useState(1);
+  const [totalPages, setTotalPages] = React.useState(1);
+
+  const getStoredToken = () => {
+    let token = localStorage.getItem("access_token") || localStorage.getItem("token") || null;
+    if (!token) return null;
+    try {
+      const maybe = JSON.parse(token);
+      if (typeof maybe === "string") token = maybe;
+    } catch (e) {}
+    return String(token).trim();
+  };
+
+  const extractErrorMessage = async (res) => {
+    try {
+      const j = await res.json();
+      if (j && (j.message || j.error || j.errors)) {
+        if (typeof j.message === "string") return j.message;
+        if (typeof j.error === "string") return j.error;
+        if (j.errors) {
+          if (typeof j.errors === "string") return j.errors;
+          if (typeof j.errors === "object") return JSON.stringify(j.errors);
+        }
+        return JSON.stringify(j);
+      }
+    } catch (e) {}
+    try {
+      const txt = await res.text();
+      if (txt) return txt;
+    } catch (e) {}
+    return "Có lỗi xảy ra";
+  };
+
+  // Fetch returns list
+  const fetchReturns = React.useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/returns`); // create this endpoint in backend
-      if (!res.ok) throw new Error("returns fetch failed");
+      const token = getStoredToken();
+      const res = await fetch(`${API_BASE}/api/returns`, {
+        headers: { Accept: "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      });
+      if (!res.ok) throw new Error("fetch returns failed");
       const data = await res.json();
-      setItems(Array.isArray(data) ? data : data.data ?? []);
+      const arr = Array.isArray(data) ? data : data.data ?? data.items ?? [];
+      setItems(arr);
+      setTotalPages(Math.max(1, Math.ceil(arr.length / PAGE_SIZE)));
     } catch (err) {
       console.error(err);
       setSnack({ severity: "error", message: "Không tải returns" });
@@ -1658,29 +1711,290 @@ function ReturnsPage({ setSnack }) {
     } finally { setLoading(false); }
   }, [setSnack]);
 
-  useEffect(()=> { fetchReturns(); }, [fetchReturns]);
+  // Fetch options for create form: orders and product-details
+  const fetchOptions = React.useCallback(async () => {
+    setOptsLoading(true);
+    const token = getStoredToken();
+    try {
+      const [oRes, pdRes] = await Promise.all([
+        fetch(`${API_BASE}/api/orders`, {
+          headers: {
+          "Authorization": `Bearer ${token}`
+        }
+        }),
+        fetch(`${API_BASE}/api/product-details?with=product,color,size`),
+      ]);
+      const oData = oRes.ok ? await oRes.json().catch(()=>[]) : [];
+      const pdData = pdRes.ok ? await pdRes.json().catch(()=>[]) : [];
+
+      const normalize = d => Array.isArray(d) ? d : (d.data ?? d.items ?? []);
+      setOrders(normalize(oData));
+      setProductDetails(normalize(pdData));
+    } catch (err) {
+      console.error("fetchOptions returns", err);
+      setSnack({ severity: "warning", message: "Không tải được orders hoặc product details" });
+      setOrders([]); setProductDetails([]);
+    } finally { setOptsLoading(false); }
+  }, [setSnack]);
+
+  React.useEffect(()=> { fetchReturns(); fetchOptions(); }, [fetchReturns, fetchOptions]);
+
+  // Create form state
+  const [form, setForm] = React.useState({
+    order_id: "",
+    product_detail_id: "",
+    quantity: 1,
+    reason: "",
+    requested_by: "",
+  });
+
+  const resetForm = () => setForm({ order_id: "", product_detail_id: "", quantity: 1, reason: "", requested_by: "" });
+
+  // Create new return
+  const handleCreate = async () => {
+    if (!form.order_id) { setSnack({ severity: "error", message: "Chọn order" }); return; }
+    if (!form.product_detail_id) { setSnack({ severity: "error", message: "Chọn product detail" }); return; }
+    if (!form.quantity || Number(form.quantity) <= 0) { setSnack({ severity: "error", message: "Quantity phải > 0" }); return; }
+    if (!form.reason || String(form.reason).trim() === "") { setSnack({ severity: "error", message: "Nhập lý do" }); return; }
+
+    if (creating) return;
+    setCreating(true);
+    try {
+      const token = getStoredToken();
+      const res = await fetch(`${API_BASE}/api/returns`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({
+          order_id: form.order_id,
+          product_detail_id: form.product_detail_id,
+          quantity: Number(form.quantity),
+          reason: form.reason,
+          requested_by: form.requested_by || null,
+        }),
+      });
+      if (!res.ok) {
+        const msg = await extractErrorMessage(res);
+        setSnack({ severity: "error", message: msg || "Tạo phiếu thất bại" });
+        return;
+      }
+      setSnack({ severity: "success", message: "Tạo phiếu thành công" });
+      setOpenCreate(false);
+      resetForm();
+      await fetchReturns();
+    } catch (err) {
+      console.error("create return error", err);
+      setSnack({ severity: "error", message: "Tạo phiếu lỗi" });
+    } finally { setCreating(false); }
+  };
+
+  // Update status or other fields of a return
+  const handleUpdate = async (id, patch) => {
+    if (updating) return;
+    setUpdating(true);
+    try {
+      const token = getStoredToken();
+      const res = await fetch(`${API_BASE}/api/returns/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Accept: "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        const msg = await extractErrorMessage(res);
+        setSnack({ severity: "error", message: msg || "Cập nhật thất bại" });
+        return;
+      }
+      setSnack({ severity: "success", message: "Cập nhật thành công" });
+      setSel(null);
+      await fetchReturns();
+    } catch (err) {
+      console.error("update return", err);
+      setSnack({ severity: "error", message: "Cập nhật lỗi" });
+    } finally { setUpdating(false); }
+  };
+
+  // Delete return
+  const handleDelete = async (id) => {
+    if (!window.confirm("Xóa phiếu đổi/trả?")) return;
+    if (deleting) return;
+    setDeleting(true);
+    try {
+      const token = getStoredToken();
+      const res = await fetch(`${API_BASE}/api/returns/${id}`, {
+        method: "DELETE",
+        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      });
+      if (!res.ok) {
+        const msg = await extractErrorMessage(res);
+        setSnack({ severity: "error", message: msg || "Xóa thất bại" });
+        return;
+      }
+      setSnack({ severity: "success", message: "Đã xóa phiếu" });
+      await fetchReturns();
+      setSel(null);
+    } catch (err) {
+      console.error("delete return", err);
+      setSnack({ severity: "error", message: "Xóa thất bại" });
+    } finally { setDeleting(false); }
+  };
+
+  // Pagination slice
+  const visible = items.slice((page-1)*PAGE_SIZE, page*PAGE_SIZE);
 
   return (
     <Box>
-      <Stack direction="row" justifyContent="space-between" sx={{ mb:2 }}>
-        <Typography variant="h6">Returns</Typography>
-        <Button onClick={fetchReturns}>Refresh</Button>
+      <Stack direction="row" justifyContent="space-between" sx={{ mb: 2 }}>
+        <Typography variant="h6">Returns / Exchanges</Typography>
+        <Stack direction="row" spacing={1}>
+          <Button onClick={fetchReturns}>Refresh</Button>
+          <Button variant="contained" startIcon={<AddIcon />} onClick={() => { resetForm(); setOpenCreate(true); }}>Create return</Button>
+        </Stack>
       </Stack>
+
       <Paper>
         {loading ? <Box sx={{ p:3, display:"flex", justifyContent:"center" }}><CircularProgress/></Box> : (
           <TableContainer>
             <Table>
-              <TableHead><TableRow><TableCell>#</TableCell><TableCell>Order</TableCell><TableCell>Reason</TableCell><TableCell>Status</TableCell></TableRow></TableHead>
+              <TableHead>
+                <TableRow>
+                  <TableCell>#</TableCell>
+                  <TableCell>Order</TableCell>
+                  <TableCell>Product</TableCell>
+                  <TableCell>Qty</TableCell>
+                  <TableCell>Reason</TableCell>
+                  <TableCell>Status</TableCell>
+                  <TableCell>Requested by</TableCell>
+                  <TableCell>Created</TableCell>
+                  <TableCell>Actions</TableCell>
+                </TableRow>
+              </TableHead>
               <TableBody>
-                {items.map(r=> <TableRow key={r.id}><TableCell>{r.id}</TableCell><TableCell>{r.order_id}</TableCell><TableCell>{r.reason}</TableCell><TableCell>{r.status}</TableCell></TableRow>)}
+                {visible.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={9} align="center" sx={{ py: 6 }}>Không có phiếu</TableCell>
+                  </TableRow>
+                ) : visible.map(r => (
+                  <TableRow key={r.id}>
+                    <TableCell>{r.id}</TableCell>
+                    <TableCell>{r.order_id ?? (r.order?.id ?? "—")}</TableCell>
+                    <TableCell>{r.product_detail?.product?.name ?? `#${r.product_detail_id}`}</TableCell>
+                    <TableCell>{r.quantity ?? "—"}</TableCell>
+                    <TableCell>{r.reason ?? "—"}</TableCell>
+                    <TableCell>
+                      <Typography variant="body2" component="span" color={r.status === "approved" ? "success.main" : r.status === "rejected" ? "error.main" : "text.secondary"}>
+                        {r.status ?? "pending"}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>{r.requested_by ?? r.user?.email ?? "—"}</TableCell>
+                    <TableCell>{r.created_at ? new Date(r.created_at).toLocaleString() : "—"}</TableCell>
+                    <TableCell>
+                      <Button size="small" startIcon={<VisibilityIcon/>} onClick={() => setSel(r)}>View</Button>
+                      <Button size="small" onClick={() => handleUpdate(r.id, { status: "approved" })}>Approve</Button>
+                      <Button size="small" color="error" onClick={() => handleUpdate(r.id, { status: "rejected" })}>Reject</Button>
+                      <Button size="small" color="error" startIcon={<DeleteIcon/>} onClick={() => handleDelete(r.id)}>Delete</Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
               </TableBody>
             </Table>
+            <Box sx={{ display:"flex", justifyContent:"center", p:2 }}>
+              <Pagination count={totalPages} page={page} onChange={(_,v)=> setPage(v)} />
+            </Box>
           </TableContainer>
         )}
       </Paper>
+
+      {/* Create dialog */}
+      <Dialog open={openCreate} onClose={() => setOpenCreate(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Create Return / Exchange</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              select
+              label="Order"
+              fullWidth
+              value={form.order_id}
+              onChange={(e)=> setForm({...form, order_id: e.target.value})}
+              helperText={optsLoading ? "Loading orders..." : ""}
+            >
+              <MenuItem value="">-- select order --</MenuItem>
+              {orders.map(o => <MenuItem key={o.id} value={o.id}>#{o.id} — {o.name ?? o.user?.email ?? "—"}</MenuItem>)}
+            </TextField>
+
+            <TextField
+              select
+              label="Product detail"
+              fullWidth
+              value={form.product_detail_id}
+              onChange={(e)=> setForm({...form, product_detail_id: e.target.value})}
+              helperText={optsLoading ? "Loading product details..." : ""}
+            >
+              <MenuItem value="">-- select --</MenuItem>
+              {productDetails.map(pd => (
+                <MenuItem key={pd.id} value={pd.id}>
+                  {pd.product?.name ?? `#${pd.product_id}`} — {pd.color?.name ?? "—"} — {pd.size?.name ?? "—"}
+                </MenuItem>
+              ))}
+            </TextField>
+
+            <TextField label="Quantity" type="number" fullWidth value={form.quantity} onChange={(e)=> setForm({...form, quantity: Number(e.target.value)})} />
+            <TextField label="Reason" fullWidth multiline minRows={3} value={form.reason} onChange={(e)=> setForm({...form, reason: e.target.value})} />
+            <TextField label="Requested by (email/name)" fullWidth value={form.requested_by} onChange={(e)=> setForm({...form, requested_by: e.target.value})} />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOpenCreate(false)} disabled={creating}>Cancel</Button>
+          <Button variant="contained" onClick={handleCreate} disabled={creating}>{creating ? "Creating..." : "Create"}</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* View / Edit dialog */}
+      <Dialog open={!!sel} onClose={() => setSel(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>Return #{sel?.id}</DialogTitle>
+        <DialogContent>
+          {sel ? (
+            <Stack spacing={1}>
+              <Typography><strong>Order:</strong> {sel.order_id ?? sel.order?.id ?? "—"}</Typography>
+              <Typography><strong>Product:</strong> {sel.product_detail?.product?.name ?? `#${sel.product_detail_id}`}</Typography>
+              <Typography><strong>Qty:</strong> {sel.quantity}</Typography>
+              <Typography><strong>Reason:</strong> {sel.reason}</Typography>
+              <Typography><strong>Requested by:</strong> {sel.requested_by ?? sel.user?.email ?? "—"}</Typography>
+              <TextField
+                select
+                label="Status"
+                value={sel.status ?? "pending"}
+                onChange={(e)=> setSel({...sel, status: e.target.value})}
+                helperText="Change status then click Update"
+              >
+                <MenuItem value="pending">pending</MenuItem>
+                <MenuItem value="approved">approved</MenuItem>
+                <MenuItem value="rejected">rejected</MenuItem>
+                <MenuItem value="refunded">refunded</MenuItem>
+              </TextField>
+
+              {/* optional admin note */}
+              <TextField
+                label="Admin note (optional)"
+                fullWidth
+                multiline
+                minRows={2}
+                value={sel.admin_note ?? ""}
+                onChange={(e)=> setSel({...sel, admin_note: e.target.value})}
+              />
+            </Stack>
+          ) : null}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSel(null)} disabled={updating}>Close</Button>
+          <Button onClick={() => handleUpdate(sel.id, { status: sel.status, admin_note: sel.admin_note ?? null })} variant="contained" disabled={updating}>
+            {updating ? "Updating..." : "Update"}
+          </Button>
+          <Button color="error" onClick={() => handleDelete(sel.id)} disabled={deleting}>Delete</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
+
 
 /* ---------------------- Stock Entries ---------------------- */
 /* ---------------------- Stock Entries (upgraded) ---------------------- */
@@ -2205,6 +2519,612 @@ function StockPage({ setSnack }) {
 }
 
 /* ---------------------- Inventory Logs ---------------------- */
+// PANEL INVENTORY – dùng API:
+// GET    /api/admin/inventory/logs
+// POST   /api/admin/inventory/adjust
+// POST   /api/admin/inventory/logs
+// POST   /api/admin/inventory/revert-receipt/{receiptId}
+
+function InventoryPage({ setSnack }) {
+  const [logs, setLogs] = React.useState([]);
+  const [loading, setLoading] = React.useState(false);
+
+  const [page, setPage] = React.useState(1);
+  const [totalPages, setTotalPages] = React.useState(1);
+
+  // filters
+  const [filters, setFilters] = React.useState({
+    type: "",
+    productDetailId: "",
+    dateFrom: "",
+    dateTo: "",
+    q: ""
+  });
+
+  // dialogs
+  const [adjustOpen, setAdjustOpen] = React.useState(false);
+  const [logOnlyOpen, setLogOnlyOpen] = React.useState(false);
+
+  const token = localStorage.getItem("access_token");
+  const PAGE_PARAM = "page";
+
+  const fetchLogs = React.useCallback(
+    async (p = 1) => {
+      setLoading(true);
+      try {
+        const params = new URLSearchParams();
+        params.append(PAGE_PARAM, p);
+
+        if (filters.type) params.append("type", filters.type);
+        if (filters.productDetailId) params.append("product_detail_id", filters.productDetailId);
+        if (filters.dateFrom) params.append("date_from", filters.dateFrom);
+        if (filters.dateTo) params.append("date_to", filters.dateTo);
+        if (filters.q) params.append("q", filters.q);
+
+        const url = `${API_BASE}/api/admin/inventory/logs?${params.toString()}`;
+        const res = await fetch(url, {
+          headers: {
+            ...(token ? { Authorization: `Bearer ${token}` } : {})
+          }
+        });
+        if (!res.ok) throw new Error(`Fetch logs failed: ${res.status}`);
+        const data = await res.json();
+
+        const arr = Array.isArray(data) ? data : (data.data ?? data.items ?? []);
+        setLogs(arr);
+
+        const lastPage =
+          (!Array.isArray(data) && (data.last_page || data.lastPage || data.meta?.last_page)) || 1;
+        setTotalPages(Math.max(1, Number(lastPage) || 1));
+        setPage(p);
+      } catch (err) {
+        console.error("fetchLogs error", err);
+        setSnack({ severity: "error", message: "Không tải được lịch sử tồn kho." });
+        setLogs([]);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [filters, token, setSnack]
+  );
+
+  React.useEffect(() => {
+    fetchLogs(1);
+  }, [fetchLogs]);
+
+  const handleFilterChange = (field, value) => {
+    setFilters(prev => ({ ...prev, [field]: value }));
+  };
+
+  const applyFilters = () => {
+    fetchLogs(1);
+  };
+
+  const resetFilters = () => {
+    setFilters({
+      type: "",
+      productDetailId: "",
+      dateFrom: "",
+      dateTo: "",
+      q: ""
+    });
+  };
+
+  const handleRevertReceipt = async (receiptId) => {
+    if (!receiptId) {
+      setSnack({ severity: "warning", message: "Không có receiptId để revert." });
+      return;
+    }
+    if (!window.confirm(`Revert receipt #${receiptId}?`)) return;
+
+    try {
+      const endpoint = `${API_BASE}/api/admin/inventory/revert-receipt/${receiptId}`;
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({})
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        console.error("revert receipt failed:", endpoint, res.status, txt);
+        setSnack({
+          severity: "error",
+          message: txt || `Revert receipt thất bại (${res.status})`
+        });
+        return;
+      }
+      setSnack({ severity: "success", message: "Đã revert receipt và cập nhật tồn kho." });
+      fetchLogs(page);
+    } catch (err) {
+      console.error("handleRevertReceipt error", err);
+      setSnack({ severity: "error", message: "Lỗi khi revert receipt." });
+    }
+  };
+
+  const handleAdjustSubmit = async (payload) => {
+    const endpoint = `${API_BASE}/api/admin/inventory/adjust`;
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        console.error("adjust failed:", endpoint, res.status, txt);
+        setSnack({ severity: "error", message: txt || `Điều chỉnh tồn kho thất bại (${res.status})` });
+        return;
+      }
+      setSnack({ severity: "success", message: "Đã điều chỉnh tồn kho." });
+      setAdjustOpen(false);
+      fetchLogs(page);
+    } catch (err) {
+      console.error("handleAdjustSubmit error", err);
+      setSnack({ severity: "error", message: "Lỗi khi điều chỉnh tồn kho." });
+    }
+  };
+
+  const handleLogOnlySubmit = async (payload) => {
+    const endpoint = `${API_BASE}/api/admin/inventory/logs`;
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        console.error("log-only failed:", endpoint, res.status, txt);
+        setSnack({ severity: "error", message: txt || `Tạo log tồn kho thất bại (${res.status})` });
+        return;
+      }
+      setSnack({ severity: "success", message: "Đã tạo log tồn kho (không đổi số lượng)." });
+      setLogOnlyOpen(false);
+      fetchLogs(page);
+    } catch (err) {
+      console.error("handleLogOnlySubmit error", err);
+      setSnack({ severity: "error", message: "Lỗi khi tạo log tồn kho." });
+    }
+  };
+
+  return (
+    <Box>
+      {/* Header + actions */}
+      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
+        <Typography variant="h6">Inventory / Stock logs</Typography>
+        <Stack direction="row" spacing={1}>
+          <Button
+            variant="outlined"
+            startIcon={<RefreshIcon />}
+            onClick={() => fetchLogs(page)}
+          >
+            Refresh
+          </Button>
+          <Button
+            variant="outlined"
+            startIcon={<HistoryIcon />}
+            onClick={() => setLogOnlyOpen(true)}
+          >
+            Log only
+          </Button>
+          <Button
+            variant="contained"
+            startIcon={<AddIcon />}
+            onClick={() => setAdjustOpen(true)}
+          >
+            Manual adjust
+          </Button>
+        </Stack>
+      </Stack>
+
+      {/* Filters */}
+      <Paper sx={{ mb: 2, p: 2 }}>
+        <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+          <TextField
+            select
+            label="Type"
+            value={filters.type}
+            onChange={(e) => handleFilterChange("type", e.target.value)}
+            size="small"
+            sx={{ minWidth: 150 }}
+          >
+            <MenuItem value="">(All)</MenuItem>
+            <MenuItem value="receipt">Receipt</MenuItem>
+            <MenuItem value="sale">Sale</MenuItem>
+            <MenuItem value="adjustment">Adjustment</MenuItem>
+            <MenuItem value="other">Other</MenuItem>
+          </TextField>
+
+          <TextField
+            label="Product detail ID"
+            size="small"
+            value={filters.productDetailId}
+            onChange={(e) => handleFilterChange("productDetailId", e.target.value)}
+            sx={{ minWidth: 160 }}
+          />
+
+          <TextField
+            label="Date from"
+            type="date"
+            size="small"
+            InputLabelProps={{ shrink: true }}
+            value={filters.dateFrom}
+            onChange={(e) => handleFilterChange("dateFrom", e.target.value)}
+          />
+
+          <TextField
+            label="Date to"
+            type="date"
+            size="small"
+            InputLabelProps={{ shrink: true }}
+            value={filters.dateTo}
+            onChange={(e) => handleFilterChange("dateTo", e.target.value)}
+          />
+
+          <TextField
+            label="Search note / user / related"
+            size="small"
+            fullWidth
+            value={filters.q}
+            onChange={(e) => handleFilterChange("q", e.target.value)}
+          />
+        </Stack>
+
+        <Stack direction="row" spacing={1} sx={{ mt: 1 }} justifyContent="flex-end">
+          <Button size="small" onClick={resetFilters}>Reset</Button>
+          <Button size="small" variant="contained" onClick={applyFilters}>Apply</Button>
+        </Stack>
+      </Paper>
+
+      {/* Table logs */}
+      <Paper>
+        {loading ? (
+          <Box sx={{ p: 3, display: "flex", justifyContent: "center" }}>
+            <CircularProgress />
+          </Box>
+        ) : (
+          <TableContainer>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>ID</TableCell>
+                  <TableCell>Time</TableCell>
+                  <TableCell>ProductDetail</TableCell>
+                  <TableCell align="right">Change</TableCell>
+                  <TableCell align="right">Qty before</TableCell>
+                  <TableCell align="right">Qty after</TableCell>
+                  <TableCell>Type</TableCell>
+                  <TableCell>Related</TableCell>
+                  <TableCell>User</TableCell>
+                  <TableCell>Note</TableCell>
+                  <TableCell>Actions</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {logs.map((row) => (
+                  <TableRow key={row.id}>
+                    <TableCell>{row.id}</TableCell>
+                    <TableCell>
+                      {row.created_at
+                        ? new Date(row.created_at).toLocaleString("vi-VN")
+                        : "-"}
+                    </TableCell>
+                    <TableCell>
+                      {row.product_detail_id}
+                      {row.product_detail?.product?.name
+                        ? ` - ${row.product_detail.product.name}`
+                        : ""}
+                    </TableCell>
+                    <TableCell align="right">
+                      <Typography
+                        variant="body2"
+                        color={
+                          Number(row.change) > 0
+                            ? "success.main"
+                            : Number(row.change) < 0
+                            ? "error.main"
+                            : "text.primary"
+                        }
+                      >
+                        {Number(row.change) > 0 ? `+${row.change}` : row.change}
+                      </Typography>
+                    </TableCell>
+                    <TableCell align="right">
+                      {row.quantity_before}
+                    </TableCell>
+                    <TableCell align="right">
+                      {row.quantity_after}
+                    </TableCell>
+                    <TableCell>
+                      <Chip
+                        size="small"
+                        label={row.type || "-"}
+                        color={
+                          row.type === "receipt"
+                            ? "success"
+                            : row.type === "sale"
+                            ? "error"
+                            : row.type === "adjustment"
+                            ? "warning"
+                            : "default"
+                        }
+                      />
+                    </TableCell>
+                    <TableCell>{row.related_id ?? "-"}</TableCell>
+                    <TableCell>
+                      {row.user?.name ?? row.user_id ?? "-"}
+                    </TableCell>
+                    <TableCell sx={{ maxWidth: 200 }}>
+                      <Typography variant="body2" noWrap title={row.note || ""}>
+                        {row.note || "-"}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      {row.type === "receipt" && row.related_id ? (
+                        <Button
+                          size="small"
+                          color="warning"
+                          onClick={() => handleRevertReceipt(row.related_id)}
+                        >
+                          Revert
+                        </Button>
+                      ) : (
+                        <Typography variant="caption" color="text.secondary">
+                          -
+                        </Typography>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+
+                {logs.length === 0 && !loading && (
+                  <TableRow>
+                    <TableCell colSpan={11} align="center">
+                      <Typography variant="body2" color="text.secondary">
+                        Không có dữ liệu.
+                      </Typography>
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+
+            <Box sx={{ display: "flex", justifyContent: "center", p: 2 }}>
+              <Pagination
+                count={totalPages}
+                page={page}
+                onChange={(_, v) => fetchLogs(v)}
+              />
+            </Box>
+          </TableContainer>
+        )}
+      </Paper>
+
+      {/* Dialog manual adjust */}
+      <InventoryAdjustDialog
+        open={adjustOpen}
+        onClose={() => setAdjustOpen(false)}
+        onSubmit={handleAdjustSubmit}
+      />
+
+      {/* Dialog log-only */}
+      <InventoryLogOnlyDialog
+        open={logOnlyOpen}
+        onClose={() => setLogOnlyOpen(false)}
+        onSubmit={handleLogOnlySubmit}
+      />
+    </Box>
+  );
+}
+
+/**
+ * Dialog điều chỉnh tồn kho (thực sự thay đổi quantity)
+ * Gửi: { product_detail_id, change, type, note }
+ */
+function InventoryAdjustDialog({ open, onClose, onSubmit }) {
+  const [form, setForm] = React.useState({
+    product_detail_id: "",
+    change: 0,
+    type: "adjustment",
+    note: ""
+  });
+  const [saving, setSaving] = React.useState(false);
+
+  React.useEffect(() => {
+    if (open) {
+      setForm({
+        product_detail_id: "",
+        change: 0,
+        type: "adjustment",
+        note: ""
+      });
+    }
+  }, [open]);
+
+  const handleSaveClick = async () => {
+    if (!form.product_detail_id) {
+      alert("product_detail_id không được để trống");
+      return;
+    }
+    if (!form.change || Number(form.change) === 0) {
+      alert("Change phải khác 0");
+      return;
+    }
+    setSaving(true);
+    try {
+      const payload = {
+        product_detail_id: form.product_detail_id,
+        change: Number(form.change),
+        type: form.type || "adjustment",
+        note: form.note || ""
+      };
+      await onSubmit(payload);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle>Manual stock adjust</DialogTitle>
+      <DialogContent>
+        <TextField
+          label="Product detail ID"
+          fullWidth
+          sx={{ mt: 1 }}
+          value={form.product_detail_id}
+          onChange={(e) => setForm({ ...form, product_detail_id: e.target.value })}
+        />
+        <TextField
+          label="Change (+ tăng, - giảm)"
+          type="number"
+          fullWidth
+          sx={{ mt: 1 }}
+          value={form.change}
+          onChange={(e) => setForm({ ...form, change: e.target.value })}
+        />
+        <TextField
+          select
+          label="Type"
+          fullWidth
+          sx={{ mt: 1 }}
+          value={form.type}
+          onChange={(e) => setForm({ ...form, type: e.target.value })}
+        >
+          <MenuItem value="adjustment">Adjustment</MenuItem>
+          <MenuItem value="receipt">Receipt</MenuItem>
+          <MenuItem value="sale">Sale</MenuItem>
+          <MenuItem value="other">Other</MenuItem>
+        </TextField>
+        <TextField
+          label="Note"
+          fullWidth
+          multiline
+          minRows={2}
+          sx={{ mt: 1 }}
+          value={form.note}
+          onChange={(e) => setForm({ ...form, note: e.target.value })}
+        />
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose} disabled={saving}>Cancel</Button>
+        <Button onClick={handleSaveClick} variant="contained" disabled={saving}>
+          {saving ? "Saving..." : "Save"}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+/**
+ * Dialog tạo log-only (không đổi quantity, chỉ lưu history)
+ * Gửi: { product_detail_id, change, type, related_id, note }
+ */
+function InventoryLogOnlyDialog({ open, onClose, onSubmit }) {
+  const [form, setForm] = React.useState({
+    product_detail_id: "",
+    change: 0,
+    type: "import",
+    related_id: "",
+    note: ""
+  });
+  const [saving, setSaving] = React.useState(false);
+
+  React.useEffect(() => {
+    if (open) {
+      setForm({
+        product_detail_id: "",
+        change: 0,
+        type: "import",
+        related_id: "",
+        note: ""
+      });
+    }
+  }, [open]);
+
+  const handleSaveClick = async () => {
+    if (!form.product_detail_id) {
+      alert("product_detail_id không được để trống");
+      return;
+    }
+    setSaving(true);
+    try {
+      const payload = {
+        product_detail_id: form.product_detail_id,
+        change: form.change ? Number(form.change) : 0,
+        type: form.type || "import",
+        related_id: form.related_id || null,
+        note: form.note || ""
+      };
+      await onSubmit(payload);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle>Create inventory log (only)</DialogTitle>
+      <DialogContent>
+        <TextField
+          label="Product detail ID"
+          fullWidth
+          sx={{ mt: 1 }}
+          value={form.product_detail_id}
+          onChange={(e) => setForm({ ...form, product_detail_id: e.target.value })}
+        />
+        <TextField
+          label="Change (optional, không đổi quantity)"
+          type="number"
+          fullWidth
+          sx={{ mt: 1 }}
+          value={form.change}
+          onChange={(e) => setForm({ ...form, change: e.target.value })}
+          helperText="Có thể 0 nếu chỉ lưu note."
+        />
+        <TextField
+          label="Type"
+          fullWidth
+          sx={{ mt: 1 }}
+          value={form.type}
+          onChange={(e) => setForm({ ...form, type: e.target.value })}
+        />
+        <TextField
+          label="Related ID (optional)"
+          fullWidth
+          sx={{ mt: 1 }}
+          value={form.related_id}
+          onChange={(e) => setForm({ ...form, related_id: e.target.value })}
+          helperText="Ví dụ: id phiếu nhập cũ, chứng từ, v.v."
+        />
+        <TextField
+          label="Note"
+          fullWidth
+          multiline
+          minRows={2}
+          sx={{ mt: 1 }}
+          value={form.note}
+          onChange={(e) => setForm({ ...form, note: e.target.value })}
+        />
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose} disabled={saving}>Cancel</Button>
+        <Button onClick={handleSaveClick} variant="contained" disabled={saving}>
+          {saving ? "Saving..." : "Save"}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
 
 
 
